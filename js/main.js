@@ -25,7 +25,7 @@ const state = {
   levels: new Set([20, 40, 50, 60]), exag: 3, opacity: 1,
   rangeKm: 150, detail: 'normal', ccFilter: true, extendToGround: true, smooth: true,
   groundLayer: 'REF', showWarnings: true, cutAxis: 'off', cutPos: 0,
-  ground: null, warnings: [], sites: [], autoFocus: true,
+  ground: null, warnings: [], sites: [], autoFocus: true, archiveFiles: [],
 };
 
 const $ = id => document.getElementById(id);
@@ -225,21 +225,18 @@ function polygonPath(ctx, geom) {
 
 let mapLines = null;
 const radarImg = document.createElement('canvas');
+const overlay = document.createElement('canvas');
+let overlayKey = '', radarKey = '', groundVersion = 0;
 
-async function drawGround() {
-  const ctx = groundCanvas.getContext('2d');
+// County/state lines + range rings, redrawn only when the site or range changes.
+function buildOverlay() {
   const S = groundCanvas.width;
-  ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
-  if (!state.meta) { groundTex.needsUpdate = true; return; }
-  const g = state.ground;
-  if (g && state.groundLayer !== 'off') {
-    radarImg.width = radarImg.height = g.size;
-    const img = state.groundLayer === 'VEL' ? g.vel : g.ref;
-    radarImg.getContext('2d').putImageData(new ImageData(img, g.size, g.size), 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(radarImg, 0, 0, S, S);
-  }
-  // range rings
+  const key = `${state.meta.icao}|${state.rangeKm}|${!!mapLines}`;
+  if (key === overlayKey) return;
+  overlayKey = key;
+  overlay.width = overlay.height = S;
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, S, S);
   ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1.5;
   for (let r = 50; r <= state.rangeKm * 1.42; r += 50) {
     ctx.beginPath(); ctx.arc(S / 2, S / 2, r / (2 * state.rangeKm) * S, 0, Math.PI * 2); ctx.stroke();
@@ -249,6 +246,29 @@ async function drawGround() {
     ctx.strokeStyle = 'rgba(150,165,185,0.30)'; ctx.lineWidth = 1.2; strokeLines(ctx, mapLines.counties);
     ctx.strokeStyle = 'rgba(215,225,240,0.75)'; ctx.lineWidth = 2.6; strokeLines(ctx, mapLines.states); strokeLines(ctx, mapLines.nation);
   }
+}
+
+function drawGround() {
+  const ctx = groundCanvas.getContext('2d');
+  const S = groundCanvas.width;
+  ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
+  if (!state.meta) { groundTex.needsUpdate = true; return; }
+  let src = null;
+  if (state.groundLayer !== 'off') {
+    if (loop.playing && loop.bitmaps.length) src = loop.bitmaps[loop.i];
+    else if (state.ground) {
+      const g = state.ground, key = `${groundVersion}|${state.groundLayer}`;
+      if (key !== radarKey) {
+        radarKey = key;
+        radarImg.width = radarImg.height = g.size;
+        radarImg.getContext('2d').putImageData(new ImageData(state.groundLayer === 'VEL' ? g.vel : g.ref, g.size, g.size), 0, 0);
+      }
+      src = radarImg;
+    }
+  }
+  if (src) { ctx.imageSmoothingEnabled = false; ctx.drawImage(src, 0, 0, S, S); }
+  buildOverlay();
+  ctx.drawImage(overlay, 0, 0);
   if (state.showWarnings) {
     for (const w of state.warnings) {
       const col = w.emergency ? '#ff00ff' : WARN_COLORS[w.phenomena] || '#ffffff';
@@ -268,30 +288,41 @@ basemap().then(b => { mapLines = b; drawGround(); }).catch(() => setNote('Map ou
 
 // ---------------- worker ----------------
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-let reqId = 0, latestBuild = 0, busy = false;
+let reqId = 0, latestBuild = 0, busy = false, pendingBuild = false;
+let quietBuild = false; // live tilt updates rebuild in the background without the progress toast
+const loop = { playing: false, bitmaps: [], times: [], i: 0, timer: null, reqId: 0 };
 
 worker.onmessage = ev => {
   const m = ev.data;
-  if (m.type === 'progress') return showProgress(m.stage, m.frac);
-  if (m.type === 'error') { busy = false; hideProgress(); return setNote(`Error: ${m.message}`, true); }
+  if (m.type === 'progress') { if (!quietBuild) showProgress(m.stage, m.frac); return; }
+  if (m.type === 'progress-done') { if (!busy) hideProgress(); return; }
+  if (m.type === 'note') return setNote(m.message);
+  if (m.type === 'live-status') return updateLiveStatus(m);
+  if (m.type === 'loop') return receiveLoop(m);
+  if (m.type === 'error') { busy = false; quietBuild = false; hideProgress(); return setNote(`Error: ${m.message}`, true); }
   if (m.type === 'loaded') {
+    if (m.meta.mode === 'live' && !state.live) return; // stale message after leaving live mode
     state.meta = m.meta;
     updateStamp();
-    requestBuild(true);
-    loadWarnings();
+    const background = m.meta.mode === 'live' && meshes.size > 0;
+    if (busy) pendingBuild = true; else { requestBuild(true); quietBuild = background; }
+    maybeWarnings();
+    if (loop.playing) requestLoop();
     return;
   }
   if (m.type === 'built' || m.type === 'iso') {
     if (m.id < latestBuild) return;
     if (m.type === 'built') {
       clearMeshes();
-      if (m.ground) { state.ground = m.ground; setGroundSize(); drawGround(); }
+      if (m.ground) { state.ground = m.ground; groundVersion++; setGroundSize(); drawGround(); }
       $('tilts').textContent = `${m.tilts.length} tilts: ${m.tilts.join('°, ')}°`;
     }
     for (const mesh of m.meshes) setMesh(mesh);
     if (m.type === 'built' && state.autoFocus) { state.autoFocus = false; focusOn(m.focus); }
     busy = false;
+    quietBuild = false;
     hideProgress();
+    if (pendingBuild) { pendingBuild = false; quietBuild = state.live; requestBuild(true); }
     const tris = [...meshes.values()].reduce((a, x) => a + (x.geometry.index ? x.geometry.index.count / 3 : 0), 0);
     setNote(tris ? `${(tris / 1000).toFixed(0)}k triangles` : 'No echoes at the selected levels in this volume.');
   }
@@ -318,10 +349,16 @@ function requestLevel(level) {
 }
 
 // ---------------- data flow ----------------
+let warnFor = 0;
+function maybeWarnings() {
+  if (state.meta && Math.abs(state.meta.lowTime - warnFor) > 120000) loadWarnings();
+}
 async function loadWarnings() {
   state.warnings = [];
   if (!state.showWarnings || !state.meta) return drawGround();
-  try { state.warnings = await warningsAt(state.meta.time); } catch { setNote('Warnings unavailable'); }
+  const t = state.meta.lowTime || state.meta.time;
+  warnFor = t;
+  try { state.warnings = await warningsAt(t); } catch { setNote('Warnings unavailable'); }
   drawGround();
 }
 
@@ -338,17 +375,23 @@ function loadFile(idx) {
 
 const DAY = 86400000;
 
-async function loadLatest() {
+// Live mode streams real-time chunks: each tilt appears as soon as the radar finishes it.
+function loadLatest() {
   setNote('');
   state.autoFocus = true;
-  showProgress('Finding latest scan', 0);
-  try {
-    let files = await listDay(state.site, new Date());
-    if (!files.length) files = await listDay(state.site, new Date(Date.now() - DAY));
-    if (!files.length) throw new Error(`No recent data for ${state.site}`);
-    state.files = files;
-    loadFile(files.length - 1);
-  } catch (e) { hideProgress(); setNote(e.message, true); }
+  state.files = []; state.fileIdx = -1; state.archiveFiles = [];
+  stopLoop();
+  showProgress('Finding the live scan', 0);
+  $('fileTime').textContent = 'Live';
+  $('scan').textContent = '';
+  history.replaceState(null, '', `#site=${state.site}&live=1`);
+  worker.postMessage({ type: 'live-start', site: state.site });
+  // archive listing: used for stepping back in time and for loop frames
+  const site = state.site;
+  listDay(site, new Date())
+    .then(f => f.length ? f : listDay(site, new Date(Date.now() - DAY)))
+    .then(f => { if (state.live && state.site === site) state.archiveFiles = f; })
+    .catch(() => {});
 }
 
 async function loadAt(timeMs) {
@@ -367,7 +410,17 @@ async function loadAt(timeMs) {
 }
 
 async function step(dir) {
-  if (!state.files.length) return;
+  if (state.live || !state.files.length) {
+    if (dir > 0) return setNote('Already showing the live scan.');
+    setLive(false);
+    try {
+      let files = state.archiveFiles && state.archiveFiles.length ? state.archiveFiles : await listDay(state.site, new Date());
+      if (!files.length) files = await listDay(state.site, new Date(Date.now() - DAY));
+      if (!files.length) return;
+      state.files = files;
+      return loadFile(files.length - 1);
+    } catch (e) { return setNote(e.message, true); }
+  }
   let i = state.fileIdx + dir;
   try {
     if (i < 0) {
@@ -383,25 +436,79 @@ async function step(dir) {
   } catch (e) { setNote(e.message, true); }
 }
 
-// auto-update when live
-setInterval(async () => {
-  if (!state.live || busy || !state.files.length) return;
-  try {
-    const files = await listDay(state.site, new Date());
-    const last = files[files.length - 1];
-    if (last && last.key !== state.files[state.fileIdx]?.key) { state.files = files; loadFile(files.length - 1); }
-  } catch { /* try again next tick */ }
-}, 90000);
+// ---------------- low-level loop ----------------
+function loopUrls() {
+  const files = state.live ? (state.archiveFiles || []) : state.files.slice(0, state.fileIdx + 1);
+  const ref = state.meta ? state.meta.lowTime : Date.now();
+  return files.filter(f => f.time < ref + 60000 && f.time > ref - 40 * 60000).slice(-4).map(f => f.url);
+}
+function requestLoop() {
+  if (!state.meta) return;
+  loop.reqId++;
+  worker.postMessage({ type: 'loop', id: loop.reqId, urls: loopUrls(), layer: state.groundLayer === 'VEL' ? 'VEL' : 'REF', rangeKm: state.rangeKm, size: 1024 });
+}
+async function receiveLoop(m) {
+  if (m.id !== loop.reqId || !loop.playing) return;
+  if (!busy) hideProgress();
+  const bitmaps = await Promise.all(m.frames.map(f => createImageBitmap(new ImageData(f.img, m.size, m.size))));
+  if (m.id !== loop.reqId || !loop.playing) return bitmaps.forEach(b => b.close());
+  loop.bitmaps.forEach(b => b.close());
+  loop.bitmaps = bitmaps;
+  loop.times = m.frames.map(f => f.time);
+  loop.i = Math.max(0, bitmaps.length - 1);
+  if (bitmaps.length < 2) setNote('Only one low-level scan so far: the loop will grow as scans arrive.');
+  loopTick();
+}
+function loopTick() {
+  clearTimeout(loop.timer);
+  if (!loop.playing) return;
+  drawGround();
+  const n = loop.bitmaps.length;
+  $('loopInfo').textContent = n ? `Frame ${loop.i + 1}/${n} · ${fmtTime(loop.times[loop.i]).slice(11)}` : 'Loading…';
+  if (n < 2) return;
+  const last = loop.i === n - 1;
+  loop.timer = setTimeout(() => { loop.i = (loop.i + 1) % n; loopTick(); }, last ? 1600 : 550);
+}
+function startLoop() {
+  if (state.groundLayer === 'off') { state.groundLayer = 'REF'; syncGroundButtons(); }
+  loop.playing = true;
+  $('loop').setAttribute('aria-pressed', 'true'); $('loop').textContent = 'Stop loop';
+  $('loopInfo').textContent = 'Loading…';
+  showProgress('Loading loop frames', 0);
+  requestLoop();
+}
+function stopLoop() {
+  loop.playing = false; loop.reqId++;
+  clearTimeout(loop.timer);
+  loop.bitmaps.forEach(b => b.close()); loop.bitmaps = []; loop.times = [];
+  $('loop').setAttribute('aria-pressed', 'false'); $('loop').textContent = 'Play low-level loop';
+  $('loopInfo').textContent = '';
+  drawGround();
+}
 
 // ---------------- UI ----------------
 function fmtTime(t) { return new Date(t).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'; }
 
 function updateStamp() {
   const m = state.meta;
+  if (!m) return;
   const site = state.sites.find(s => s.id === m.icao);
-  $('stamp').textContent = `${m.icao}${site ? ' · ' + site.name : ''} · ${fmtTime(m.time)} · VCP ${m.vcp ?? '?'}`;
-  const age = Date.now() - m.time;
-  $('age').textContent = age < 3 * 3600e3 ? `${Math.round(age / 60000)} min old` : 'archive';
+  const t = m.lowTime || m.time;
+  $('stamp').textContent = `${m.icao}${site ? ' · ' + site.name : ''} · ${fmtTime(t)} · VCP ${m.vcp ?? '?'}`;
+  const age = Math.max(0, Date.now() - t);
+  const isLive = m.mode === 'live' && state.live;
+  $('age').textContent = isLive ? `LIVE · ${age < 90000 ? Math.round(age / 1000) + ' s' : Math.round(age / 60000) + ' min'} old`
+    : age < 3 * 3600e3 ? `${Math.round(age / 60000)} min old` : 'archive';
+  $('age').classList.toggle('live', isLive);
+  if (!isLive) $('scan').textContent = '';
+}
+setInterval(updateStamp, 5000);
+
+function updateLiveStatus(m) {
+  if (!state.live) return;
+  const cuts = m.nCuts ? `cut ${Math.min(m.cutsDone + (m.scanning != null ? 1 : 0), m.nCuts)}/${m.nCuts}` : `${m.cutsDone} cuts done`;
+  $('scan').textContent = m.ended ? 'Volume complete · waiting for the next one'
+    : m.scanning != null ? `Scanning ${m.scanning}° ${m.sweepFrac != null ? Math.round(m.sweepFrac * 100) + '%' : ''} · ${cuts}` : cuts;
 }
 
 function updateHash(f) {
@@ -438,6 +545,7 @@ function buildLegend() {
 }
 
 function setLive(on) {
+  if (!on && state.live) worker.postMessage({ type: 'live-stop' });
   state.live = on;
   $('live').classList.toggle('on', on);
   $('live').setAttribute('aria-pressed', on);
@@ -452,8 +560,12 @@ async function initSites() {
   if (state.meta) updateStamp();
 }
 
+function syncGroundButtons() {
+  document.querySelectorAll('[data-ground]').forEach(x => x.setAttribute('aria-pressed', x.dataset.ground === state.groundLayer));
+}
+
 function bind() {
-  $('site').addEventListener('change', e => { state.site = e.target.value; state.live ? loadLatest() : setNote('Press “Latest” or pick a time to load this radar.'); });
+  $('site').addEventListener('change', e => { state.site = e.target.value; state.live ? loadLatest() : setNote('Press “Live” or pick a time to load this radar.'); });
   $('live').addEventListener('click', () => { setLive(true); loadLatest(); });
   $('go').addEventListener('click', () => {
     const d = $('date').value, t = $('time').value || '00:00';
@@ -486,12 +598,14 @@ function bind() {
 
   for (const b of document.querySelectorAll('[data-ground]')) b.addEventListener('click', () => {
     state.groundLayer = b.dataset.ground;
-    document.querySelectorAll('[data-ground]').forEach(x => x.setAttribute('aria-pressed', x === b));
+    syncGroundButtons();
+    if (loop.playing) { if (state.groundLayer === 'off') stopLoop(); else { loop.bitmaps = []; requestLoop(); } }
     drawGround();
   });
+  $('loop').addEventListener('click', () => (loop.playing ? stopLoop() : startLoop()));
   $('warn').addEventListener('change', e => { state.showWarnings = e.target.checked; loadWarnings(); });
 
-  $('range').addEventListener('change', e => { state.rangeKm = +e.target.value; requestBuild(true); view('3d'); });
+  $('range').addEventListener('change', e => { state.rangeKm = +e.target.value; requestBuild(true); view('3d'); if (loop.playing) requestLoop(); });
   $('detail').addEventListener('change', e => { state.detail = e.target.value; requestBuild(false); });
   $('cc').addEventListener('change', e => { state.ccFilter = e.target.checked; requestBuild(false); });
   $('extend').addEventListener('change', e => { state.extendToGround = e.target.checked; requestBuild(false); });

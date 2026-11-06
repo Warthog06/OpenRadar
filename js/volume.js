@@ -5,34 +5,64 @@ const RE = 6371 * 4 / 3;          // effective earth radius (km), standard 4/3 r
 const DEG = 180 / Math.PI;
 export const EMPTY = -30;          // "no echo" fill value in dBZ
 
-// One sweep per distinct elevation angle. For split cuts / SAILS repeats keep the longest-range one.
-export function selectTilts(vol, moment = 'REF') {
-  const groups = new Map();
-  for (const s of vol.sweeps) {
-    const m = s.moments[moment];
-    if (!m) continue;
-    const key = Math.round(s.angle * 10);
-    const g = groups.get(key);
-    if (!g || m.ngates > g.m.ngates) groups.set(key, { angle: s.angle, m, sweep: s });
-  }
-  const tilts = [...groups.values()].sort((a, b) => a.angle - b.angle);
-  // attach a correlation-coefficient sweep at the same angle (for non-weather filtering)
-  for (const t of tilts) {
-    const key = Math.round(t.angle * 10);
-    const withRho = vol.sweeps.filter(s => Math.round(s.angle * 10) === key && s.moments.RHO);
-    t.rho = withRho.length ? withRho[0].moments.RHO : null;
-  }
-  return tilts;
+// Newest complete sweep in a group that has `moment`; for REF prefer the long-range
+// surveillance cut of split cuts (most gates), so Doppler-cut REF never wins.
+function newestOf(group, moment) {
+  const withM = group.filter(s => s.moments[moment]);
+  if (!withM.length) return null;
+  const maxG = Math.max(...withM.map(s => s.moments[moment].ngates));
+  const good = moment === 'REF' ? withM.filter(s => s.moments[moment].ngates >= 0.95 * maxG) : withM;
+  return good.reduce((a, b) => (b.time > a.time ? b : a));
 }
 
-// Most recent sweep at the lowest angle that has `moment` (SAILS gives several).
-export function lowestSweep(vol, moment) {
-  let best = null;
-  for (const s of vol.sweeps) {
-    if (!s.moments[moment]) continue;
-    if (!best || s.angle < best.angle - 0.05 || (Math.abs(s.angle - best.angle) <= 0.05 && s.elevNum > best.elevNum)) best = s;
+// Complete sweeps clustered by elevation angle, lowest first. Clustering (not rounding) because
+// the lowest tilt drifts a little between volumes (e.g. 0.44 vs 0.48 deg) with AVSET/SAILS.
+function completeGroups(vol) {
+  const sw = vol.sweeps.filter(s => s.complete).sort((a, b) => a.angle - b.angle);
+  const groups = [];
+  let g = null;
+  for (const s of sw) {
+    if (!g || s.angle - g.base > 0.25) { g = { base: s.angle, list: [] }; groups.push(g); }
+    g.list.push(s);
   }
-  return best;
+  return groups.map(x => x.list);
+}
+
+// One sweep per distinct elevation angle: the newest complete one (SAILS / rolling live updates).
+export function selectTilts(vol, moment = 'REF') {
+  const tilts = [];
+  for (const group of completeGroups(vol)) {
+    const sw = newestOf(group, moment);
+    if (!sw) continue;
+    const rhoSweep = sw.moments.RHO ? sw : newestOf(group, 'RHO');
+    tilts.push({ angle: sw.angle, m: sw.moments[moment], sweep: sw, rho: rhoSweep ? rhoSweep.moments.RHO : null });
+  }
+  return tilts.sort((a, b) => a.angle - b.angle);
+}
+
+// Most recent complete sweep at the lowest angle that has `moment`.
+export function lowestSweep(vol, moment) {
+  for (const group of completeGroups(vol)) {
+    const sw = newestOf(group, moment);
+    if (sw) return sw;
+  }
+  return null;
+}
+
+// Every complete lowest-angle scan in a volume as a loop frame (SAILS gives up to 4 per volume).
+export function lowFrames(vol) {
+  const lowest = completeGroups(vol).find(g => g.some(s => s.moments.REF));
+  if (!lowest) return [];
+  const group = lowest.sort((a, b) => a.time - b.time);
+  const maxG = Math.max(...group.filter(s => s.moments.REF).map(s => s.moments.REF.ngates));
+  const frames = [];
+  for (const s of group) {
+    if (!s.moments.REF || s.moments.REF.ngates < 0.95 * maxG) continue;
+    // pair with the Doppler cut that follows (or the sweep itself if it carries velocity)
+    const velSweep = s.moments.VEL ? s : group.find(v => v.moments.VEL && v.time >= s.time && v.time - s.time < 180000);
+    frames.push({ time: s.time, angle: s.angle, icao: vol.icao, ref: s.moments.REF, vel: velSweep ? velSweep.moments.VEL : null, velAngle: velSweep ? velSweep.angle : s.angle });
+  }
+  return frames;
 }
 
 /**
@@ -228,12 +258,10 @@ function velColor(v) { // m/s, negative = toward radar
   return [Math.round(110 + 145 * a), Math.round(20 * (1 - a)), Math.round(30 * (1 - a))];
 }
 
-export function groundImage(vol, moment, rangeKm, size) {
-  const sw = lowestSweep(vol, moment);
+export function sweepImage(ms, angle, moment, rangeKm, size) {
   const img = new Uint8ClampedArray(size * size * 4);
-  if (!sw) return { img, angle: null };
-  const m = sw.moments[moment];
-  const cosE = Math.cos(sw.angle / DEG);
+  if (!ms) return img;
+  const cosE = Math.cos(angle / DEG);
   const kmPerPx = 2 * rangeKm / size;
   for (let py = 0; py < size; py++) {
     const north = rangeKm - (py + 0.5) * kmPerPx;
@@ -241,12 +269,18 @@ export function groundImage(vol, moment, rangeKm, size) {
       const east = -rangeKm + (px + 0.5) * kmPerPx;
       const s = Math.hypot(east, north);
       const az = (Math.atan2(east, north) * DEG + 360) % 360;
-      const v = sampleSweep(m, az, s / cosE);
+      const v = sampleSweep(ms, az, s / cosE);
       const c = moment === 'REF' ? refColor(v) : velColor(v);
       if (!c) continue;
       const o = (py * size + px) * 4;
       img[o] = c[0]; img[o + 1] = c[1]; img[o + 2] = c[2]; img[o + 3] = 235;
     }
   }
-  return { img, angle: sw.angle };
+  return img;
+}
+
+export function groundImage(vol, moment, rangeKm, size) {
+  const sw = lowestSweep(vol, moment);
+  if (!sw) return { img: new Uint8ClampedArray(size * size * 4), angle: null, time: null };
+  return { img: sweepImage(sw.moments[moment], sw.angle, moment, rangeKm, size), angle: sw.angle, time: sw.time };
 }

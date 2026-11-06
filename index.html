@@ -19,6 +19,11 @@
   #hud .brand { font-weight: 700; letter-spacing: .02em; }
   #stamp { color: var(--muted); font-variant-numeric: tabular-nums; }
   #age { font-size: 12px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
+  #age.live { color: #ffd9d9; border-color: #ff4d4d; background: rgba(255, 60, 60, 0.15); }
+  #age.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #ff4d4d; margin-right: 6px; vertical-align: 1px; animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) { #age.live::before { animation: none; } }
+  #scan { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
   #panel { position: fixed; top: 0; left: 0; bottom: 0; width: 330px; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--line); padding: 14px 16px 24px; backdrop-filter: blur(6px); }
   #panel h1 { font-size: 16px; margin: 0 0 2px; }
@@ -36,7 +41,8 @@
   button { cursor: pointer; white-space: nowrap; }
   button:hover { border-color: #3a4a60; }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
-  button.primary.on::before { content: "● "; color: #06331a; }
+  button.primary.on, button.primary[aria-pressed="true"] { background: rgba(255, 60, 60, 0.16); border-color: #ff4d4d; color: #ffd9d9; }
+  button.primary.on::before { content: "● "; color: #ff4d4d; }
   button[aria-pressed="true"] { background: #1d2a3b; border-color: var(--accent); }
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .seg { display: flex; } .seg button { flex: 1; border-radius: 0; } .seg button:first-child { border-radius: 7px 0 0 7px; } .seg button:last-child { border-radius: 0 7px 7px 0; }
@@ -86,7 +92,7 @@
 <body>
 <canvas id="view" aria-label="3D radar view"></canvas>
 
-<div id="hud"><span class="brand">OpenRadar 3D</span><span id="stamp">Loading…</span><span id="age"></span></div>
+<div id="hud"><span class="brand">OpenRadar 3D</span><span id="stamp">Loading…</span><span id="age"></span><span id="scan" aria-live="polite"></span></div>
 <div class="help">Drag to orbit · right-drag to pan · scroll to zoom · double-click to focus</div>
 
 <aside id="panel">
@@ -96,7 +102,7 @@
   <section>
     <h2>Radar</h2>
     <div class="row"><select id="site" class="grow" aria-label="Radar site"></select><button id="nearest" title="Nearest radar to me" aria-label="Nearest radar">⌖</button></div>
-    <div class="row"><button id="live" class="primary grow" aria-pressed="false">Latest (live)</button></div>
+    <div class="row"><button id="live" class="primary grow" aria-pressed="false">Live (real-time)</button></div>
     <div class="row"><input type="date" id="date" class="grow" aria-label="Date (UTC)"><input type="time" id="time" aria-label="Time (UTC)"><button id="go">Load</button></div>
     <select id="preset" aria-label="Historical cases"></select>
     <div class="row"><button id="prev" aria-label="Previous scan">◀</button><span id="fileTime">–</span><button id="next" aria-label="Next scan">▶</button></div>
@@ -122,6 +128,8 @@
       <button data-ground="VEL" aria-pressed="false">Velocity</button>
       <button data-ground="off" aria-pressed="false">Off</button>
     </div>
+    <div class="row"><button id="loop" aria-pressed="false" class="grow">Play low-level loop</button></div>
+    <div class="small" id="loopInfo" aria-live="polite"></div>
     <label class="check"><input type="checkbox" id="warn" checked> Warning polygons</label>
     <div id="legend" aria-hidden="true"></div><div id="legendTicks" aria-hidden="true"></div>
   </section>

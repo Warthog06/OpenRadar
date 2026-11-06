@@ -17,7 +17,8 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 
 ## Features
 
-- Live mode: latest scan for any of the ~160 WSR-88D radars, with auto-update every 90 s.
+- Real-time live mode for any of the ~160 WSR-88D radars. It streams the radar's real-time chunks, so each tilt shows up seconds after the radar finishes it, not 5–10 min later. The 3D view updates as a rolling volume, using the newest copy of every tilt. The HUD shows the tilt being scanned and how far through the volume the radar is.
+- Low-level loop: animates the recent lowest-tilt scans (reflectivity or velocity), including the extra SAILS / MESO-SAILS scans the radar takes every 1–2 min in severe weather. Earlier volumes are fetched with HTTP range requests, so only about 3 MB of each is downloaded.
 - Archive mode: any date back to the 1990s, plus historical tornado presets. Step through scans with ◀ ▶.
 - 3D reflectivity surfaces at selectable dBZ levels, with vertical exaggeration, opacity and a cutaway plane.
 - Ground layer showing lowest-tilt reflectivity or velocity, county and state lines, and warning polygons valid at the scan time.
@@ -31,13 +32,13 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 | `js/bzip2.js` | Dependency-free bzip2 decoder (Level II records are bzip2-compressed) |
 | `js/level2.js` | Archive II / message 31 parser → sweeps of REF, VEL, RHO, … |
 | `js/volume.js` | Beam-height math (4/3 earth model) → 3D Cartesian grid → surface-nets isosurfaces |
-| `js/worker.js` | Runs download, decode and meshing off the main thread |
+| `js/worker.js` | Runs download, decode and meshing off the main thread; real-time chunk polling; loop frames |
 | `js/sources.js` | Data sources (all free, no keys) |
 | `js/main.js` | three.js scene, map drawing, UI |
 
 ## Data sources (all free, no key)
 
-- Radar: NOAA NEXRAD Level II, `unidata-nexrad-level2` on AWS Open Data
+- Radar: NOAA NEXRAD Level II on AWS Open Data: `unidata-nexrad-level2` (archive) and `unidata-nexrad-level2-chunks` (real time)
 - Radar site list: NWS API (`api.weather.gov/radar/stations`)
 - Warning polygons (live and historical): Iowa Environmental Mesonet `sbw.geojson`
 - Boundaries: US Census via `us-atlas` (jsDelivr)
@@ -45,7 +46,8 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 
 ## Known limitations
 
-- Scans appear in the archive bucket about 5–10 min after they finish. True real-time needs the `unidata-nexrad-level2-chunks` bucket (not wired up yet).
+- Live mode depends on how fast NOAA publishes chunks, normally within seconds. In clear air (VCP 35) a full volume takes about 7 min, so the low-level scan can be that old just before the next volume starts.
+- The loop animates only the ground layer. The 3D surfaces stay on the newest scan.
 - Velocity is shown in 2D only. 3D velocity would need dealiasing.
 - Radar geometry limits: nothing directly above the radar (cone of silence), gaps between tilts at long range, and the lowest beam is several km up at 150+ km. "Extend lowest beam to ground" fills that gap for looks. It is not observed data.
 
