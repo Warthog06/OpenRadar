@@ -28,7 +28,7 @@ const state = {
   rangeKm: 150, detail: 'normal', ccFilter: true, extendToGround: true, smooth: true,
   groundLayer: 'REF', showWarnings: true, cutAxis: 'off', cutPos: 0,
   ground: null, warnings: [], sites: [], autoFocus: true, archiveFiles: [],
-  basemap: 'osm', show3d: true, rapidOn: true, rapid: {},
+  basemap: 'osm', show3d: true, rapidMode: 'low', rapid: {}, liveStatus: null,
 };
 
 const $ = id => document.getElementById(id);
@@ -269,6 +269,8 @@ function ensureTiles() {
 }
 
 const rapidCanvas = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
+// follow mode: the previous sweep stays underneath while the next one is drawn
+const rapidBase = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
 
 function drawGround() {
   const ctx = groundCanvas.getContext('2d');
@@ -279,7 +281,13 @@ function drawGround() {
   ensureTiles();
   if (state.basemap !== 'lines' && tileReady) ctx.drawImage(tileCanvas, 0, 0);
   let src = null;
-  if (state.groundLayer !== 'off') {
+  const r = state.rapid[state.groundLayer];
+  const rapidLive = state.live && !loop.playing && state.rapidMode !== 'off' && state.groundLayer !== 'off';
+  const showRapid = rapidLive && r && r.rangeKm === state.rangeKm;
+  const follow = showRapid && state.rapidMode === 'follow';
+  if (follow) {
+    if (r.hasBase) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidBase[state.groundLayer], 0, 0, S, S); }
+  } else if (state.groundLayer !== 'off') {
     if (loop.playing && loop.bitmaps.length) src = loop.bitmaps[loop.i];
     else if (state.ground) {
       const g = state.ground, key = `${groundVersion}|${state.groundLayer}`;
@@ -292,10 +300,8 @@ function drawGround() {
     }
   }
   if (src) { ctx.imageSmoothingEnabled = false; ctx.drawImage(src, 0, 0, S, S); }
-  // rapid scan: newest radials of the low tilt that is still being scanned, plus the beam line
-  const r = state.rapid[state.groundLayer];
-  const showRapid = r && state.rapidOn && state.live && !loop.playing && r.rangeKm === state.rangeKm;
-  if (showRapid) ctx.drawImage(rapidCanvas[state.groundLayer], 0, 0, S, S);
+  // rapid scan: newest radials of the sweep that is still being scanned
+  if (showRapid) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidCanvas[state.groundLayer], 0, 0, S, S); }
   buildOverlay();
   ctx.drawImage(overlay, 0, 0);
   if (state.showWarnings) {
@@ -307,11 +313,16 @@ function drawGround() {
       ctx.strokeStyle = col; ctx.lineWidth = 4; ctx.stroke();
     }
   }
-  if (showRapid) {
-    const a = r.lastAz * Math.PI / 180, len = S * 0.75;
-    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 7;
+  // beam line: always shown in live mode; bright while it is drawing the layer you are looking at
+  const ls = state.liveStatus;
+  const beamAz = showRapid && !r.complete ? r.lastAz : (rapidLive && ls && ls.lastAz != null ? ls.lastAz : null);
+  if (beamAz != null) {
+    const a = beamAz * Math.PI / 180, len = S * 0.75, bright = showRapid && !r.complete;
+    ctx.setLineDash(bright ? [] : [14, 10]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = bright ? 7 : 5;
     ctx.beginPath(); ctx.moveTo(S / 2, S / 2); ctx.lineTo(S / 2 + Math.sin(a) * len, S / 2 - Math.cos(a) * len); ctx.stroke();
-    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = bright ? '#ffffff' : 'rgba(255,255,255,0.6)'; ctx.lineWidth = bright ? 3 : 2; ctx.stroke();
+    ctx.setLineDash([]);
   }
   // radar site marker
   ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(S / 2, S / 2, 7, 0, Math.PI * 2); ctx.fill();
@@ -332,16 +343,24 @@ worker.onmessage = ev => {
   if (m.type === 'progress') { if (!quietBuild) showProgress(m.stage, m.frac); return; }
   if (m.type === 'progress-done') { if (!busy) hideProgress(); return; }
   if (m.type === 'note') return setNote(m.message);
-  if (m.type === 'live-status') return updateLiveStatus(m);
+  if (m.type === 'live-status') { state.liveStatus = m; updateLiveStatus(m); updateRapidInfo(); return drawGround(); }
   if (m.type === 'loop') return receiveLoop(m);
   if (m.type === 'rapid') {
-    if (!state.live || !state.rapidOn) return;
-    const c = rapidCanvas[m.moment];
+    if (!state.live || state.rapidMode === 'off' || m.mode !== state.rapidMode) return;
+    const c = rapidCanvas[m.moment], prev = state.rapid[m.moment];
+    let hasBase = prev ? prev.hasBase : false;
+    if (prev && prev.time !== m.time && m.mode === 'follow') {
+      // a new sweep started: keep the previous one underneath
+      const b = rapidBase[m.moment];
+      b.width = b.height = c.width;
+      b.getContext('2d').drawImage(c, 0, 0);
+      hasBase = true;
+    }
     c.width = c.height = m.size;
     c.getContext('2d').putImageData(new ImageData(m.img, m.size, m.size), 0, 0);
-    state.rapid[m.moment] = { time: m.time, lastAz: m.lastAz, rangeKm: m.rangeKm };
+    state.rapid[m.moment] = { time: m.time, lastAz: m.lastAz, rangeKm: m.rangeKm, angle: m.angle, complete: m.complete, hasBase };
     $('scan').dataset.rapid = '1';
-    updateStamp();
+    updateStamp(); updateRapidInfo();
     return drawGround();
   }
   if (m.type === 'error') { busy = false; quietBuild = false; hideProgress(); return setNote(`Error: ${m.message}`, true); }
@@ -362,8 +381,10 @@ worker.onmessage = ev => {
       if (m.ground) {
         state.ground = m.ground; groundVersion++;
         // a finished low tilt replaces its rapid-scan preview
-        if (state.rapid.REF && m.ground.refTime >= state.rapid.REF.time) delete state.rapid.REF;
-        if (state.rapid.VEL && m.ground.velTime >= state.rapid.VEL.time) delete state.rapid.VEL;
+        if (state.rapidMode === 'low') {
+          if (state.rapid.REF && m.ground.refTime >= state.rapid.REF.time) delete state.rapid.REF;
+          if (state.rapid.VEL && m.ground.velTime >= state.rapid.VEL.time) delete state.rapid.VEL;
+        }
         setGroundSize(); drawGround();
       }
       $('tilts').textContent = `${m.tilts.length} tilts: ${m.tilts.join('°, ')}°`;
@@ -548,8 +569,9 @@ function updateStamp() {
   $('stamp').textContent = `${m.icao}${site ? ' · ' + site.name : ''} · ${fmtTime(t)} · VCP ${m.vcp ?? '?'}`;
   const age = Math.max(0, Date.now() - t);
   const isLive = m.mode === 'live' && state.live;
-  const rapidNow = isLive && state.rapidOn && state.rapid[state.groundLayer];
-  $('age').textContent = rapidNow ? 'LIVE · low tilt scanning now'
+  const rr = state.rapid[state.groundLayer];
+  const rapidNow = isLive && state.rapidMode !== 'off' && rr && !rr.complete;
+  $('age').textContent = rapidNow ? `LIVE · ${rr.angle}° scanning now`
     : isLive ? `LIVE · ${age < 90000 ? Math.round(age / 1000) + ' s' : Math.round(age / 60000) + ' min'} old`
     : age < 3 * 3600e3 ? `${Math.round(age / 60000)} min old` : 'archive';
   $('age').classList.toggle('live', isLive);
@@ -559,7 +581,7 @@ setInterval(updateStamp, 5000);
 
 function updateLiveStatus(m) {
   if (!state.live) return;
-  const cuts = m.nCuts ? `cut ${Math.min(m.cutsDone + (m.scanning != null ? 1 : 0), m.nCuts)}/${m.nCuts}` : `${m.cutsDone} cuts done`;
+  const cuts = `tilt ${m.cutsDone + (m.scanning != null ? 1 : 0)}`;
   $('scan').textContent = m.ended ? 'Volume complete · waiting for the next one'
     : m.scanning != null ? `Scanning ${m.scanning}° ${m.sweepFrac != null ? Math.round(m.sweepFrac * 100) + '%' : ''} · ${cuts}` : cuts;
 }
@@ -598,11 +620,30 @@ function buildLegend() {
 }
 
 function sendRapidConfig() {
-  worker.postMessage({ type: 'rapid-config', on: state.rapidOn, rangeKm: state.rangeKm, size: 1024 });
+  worker.postMessage({ type: 'rapid-config', mode: state.rapidMode, rangeKm: state.rangeKm, size: 1024 });
+}
+
+// Plain-language status for the rapid scan setting.
+function updateRapidInfo() {
+  const el = $('rapidInfo');
+  if (state.rapidMode === 'off') { el.textContent = ''; return; }
+  if (!state.live) { el.innerHTML = 'Works in Live mode. <button id="rapidGoLive" class="linkish">Go live</button>'; $('rapidGoLive').onclick = () => { setLive(true); loadLatest(); }; return; }
+  const ls = state.liveStatus, r = state.rapid[state.groundLayer];
+  if (state.groundLayer === 'off') { el.textContent = 'Turn the ground layer on to see it.'; return; }
+  if (!ls) { el.textContent = 'Connecting to the radar…'; return; }
+  if (ls.ended) { el.textContent = 'Volume finished: waiting for the radar to start the next one.'; return; }
+  if (state.rapidMode === 'follow') {
+    el.textContent = r ? `Showing ${r.angle}° ${r.complete ? '(finished)' : 'as it is scanned'}.` : `Waiting for ${state.groundLayer === 'VEL' ? 'a tilt with velocity' : 'the next chunk'}…`;
+    return;
+  }
+  if (ls.onLowTilt && r && !r.complete) el.textContent = `Updating now: ${r.angle}° low tilt, ${Math.round((ls.sweepFrac || 0) * 100)}% scanned.`;
+  else if (ls.onLowTilt) el.textContent = `Low tilt in progress (${state.groundLayer === 'REF' ? 'velocity' : 'reflectivity'} cut): switch layer to see it, or wait.`;
+  else el.textContent = `Radar is ${ls.scanning != null ? `on ${ls.scanning}°` : 'between tilts'} now (dashed line = beam). The low tilt updates at the next ${ls.nCuts > 14 ? 'SAILS cut or ' : ''}volume. Pick “Follow the radar” to watch every tilt.`;
 }
 
 function setLive(on) {
-  state.rapid = {};
+  state.rapid = {}; state.liveStatus = null;
+  setTimeout(updateRapidInfo);
   if (!on && state.live) worker.postMessage({ type: 'live-stop' });
   state.live = on;
   $('live').classList.toggle('on', on);
@@ -672,13 +713,13 @@ function bind() {
 
   for (const b of document.querySelectorAll('[data-ground]')) b.addEventListener('click', () => {
     state.groundLayer = b.dataset.ground;
-    syncGroundButtons();
+    syncGroundButtons(); updateRapidInfo(); updateStamp();
     if (loop.playing) { if (state.groundLayer === 'off') stopLoop(); else { loop.bitmaps = []; requestLoop(); } }
     drawGround();
   });
   $('loop').addEventListener('click', () => (loop.playing ? stopLoop() : startLoop()));
   $('basemap').addEventListener('change', e => { state.basemap = e.target.value; tileKey = ''; drawGround(); });
-  $('rapidOn').addEventListener('change', e => { state.rapidOn = e.target.checked; state.rapid = {}; sendRapidConfig(); drawGround(); });
+  $('rapidMode').addEventListener('change', e => { state.rapidMode = e.target.value; state.rapid = {}; sendRapidConfig(); updateRapidInfo(); updateStamp(); drawGround(); });
   $('show3d').addEventListener('change', e => {
     state.show3d = e.target.checked;
     storm.visible = ruler.visible = state.show3d;

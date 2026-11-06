@@ -19,7 +19,7 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 
 - Real-time live mode for any of the ~160 WSR-88D radars. It streams the radar's real-time chunks, so each tilt shows up seconds after the radar finishes it, not 5–10 min later. The 3D view updates as a rolling volume, using the newest copy of every tilt. The HUD shows the tilt being scanned and how far through the volume the radar is.
 - Low-level loop: animates the recent lowest-tilt scans (reflectivity or velocity), including the extra SAILS / MESO-SAILS scans the radar takes every 1–2 min in severe weather. Earlier volumes are fetched with HTTP range requests, so only about 3 MB of each is downloaded.
-- Rapid scan overlay (live): while the radar is scanning its lowest tilt, the newest radials are drawn over the previous scan every few seconds, with a line showing where the beam is pointing.
+- Rapid scan (live): new radials are drawn every few seconds as the radar scans, with a line showing where the beam points. "Lowest tilt" updates the low-level scan whenever the radar is on it; "Follow the radar" shows whichever tilt is being scanned right now. A status line says what it is doing or waiting for.
 - OpenStreetMap under the radar (or a dark OSM-based map, or plain outlines), with city names and roads.
 - 3D on/off switch for a plain 2D radar view.
 - Map picker: choose a radar by clicking it on a zoomable map (Leaflet) that shows the national radar mosaic (IEM) and the warning polygons in effect, so you can see where the storms are. In archive mode it jumps to the same moment on the new radar.

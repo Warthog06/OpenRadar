@@ -166,7 +166,11 @@ function merged(L) {
 function liveStatus(L, cur) {
   const done = cur.sweeps.filter(s => s.complete).length;
   const active = cur.sweeps.find(s => !s.complete);
+  const am = active && (active.moments.REF || active.moments.VEL);
+  const low = lowestSweep(cur.sweeps.some(s => s.complete) ? cur : (L.prev || cur), 'REF');
   return {
+    lastAz: am ? am.az[am.n - 1] : null,
+    onLowTilt: !!(active && low && Math.abs(active.angle - low.angle) <= 0.25) || !!(active && !low),
     type: 'live-status', volNum: L.n, volTime: L.time, nCuts: L.acc.nCuts || null,
     cutsDone: done, scanning: active ? +active.angle.toFixed(1) : null,
     sweepFrac: active ? Math.min(1, active.nRadials / (active.angle < 1.7 ? 720 : 360)) : null,
@@ -174,25 +178,37 @@ function liveStatus(L, cur) {
   };
 }
 
-// Rapid scan overlay: draw the lowest tilt while it is still being scanned, so the newest
-// radials appear every few seconds on top of the previous complete scan.
-let rapid = { on: true, rangeKm: 150, size: 1024 };
+// Rapid scan: draw the sweep that is still being scanned, so new radials appear every few seconds.
+//  mode 'low'    -> only the lowest tilt (shown on top of the previous low-level scan)
+//  mode 'follow' -> whatever tilt the radar is on right now
+let rapid = { mode: 'low', rangeKm: 150, size: 1024 };
+let lastRapidKey = '';
 function postRapid(v, cur) {
-  if (!rapid.on) return;
-  const active = cur.sweeps.find(s => !s.complete);
-  if (!active) return;
-  const low = lowestSweep(v, 'REF');
-  const lowAngle = low ? low.angle : active.angle;
-  if (Math.abs(active.angle - lowAngle) > 0.25) return;
-  // surveillance cut -> reflectivity; Doppler cut -> velocity
-  const moments = active.moments.VEL ? ['VEL'] : ['REF'];
-  for (const moment of moments) {
-    const ms = active.moments[moment];
-    if (!ms) continue;
-    const img = sweepImage(ms, active.angle, moment, rapid.rangeKm, rapid.size);
-    post({ type: 'rapid', moment, img, size: rapid.size, rangeKm: rapid.rangeKm, time: active.time,
-      lastAz: ms.az[ms.n - 1], angle: active.angle }, [img.buffer]);
+  if (rapid.mode === 'off') return;
+  let target = cur.sweeps.find(s => !s.complete);
+  if (!target && rapid.mode === 'follow') target = cur.sweeps[cur.sweeps.length - 1]; // just-finished sweep
+  if (!target) return;
+  if (rapid.mode === 'low') {
+    const low = lowestSweep(v, 'REF');
+    if (Math.abs(target.angle - (low ? low.angle : target.angle)) > 0.25) return;
   }
+  const key = `${target.elevNum}|${target.time}|${target.nRadials}|${rapid.mode}|${rapid.rangeKm}`;
+  if (key === lastRapidKey) return;
+  lastRapidKey = key;
+  // in 'low' mode: surveillance cut -> reflectivity, Doppler cut -> velocity; 'follow' sends both if present
+  const moments = rapid.mode === 'follow' ? ['REF', 'VEL'] : (target.moments.VEL ? ['VEL'] : ['REF']);
+  for (const moment of moments) {
+    const ms = target.moments[moment];
+    if (!ms) continue;
+    const img = sweepImage(ms, target.angle, moment, rapid.rangeKm, rapid.size);
+    post({ type: 'rapid', moment, img, size: rapid.size, rangeKm: rapid.rangeKm, time: target.time,
+      lastAz: ms.az[ms.n - 1], angle: +target.angle.toFixed(1), complete: target.complete, mode: rapid.mode }, [img.buffer]);
+  }
+}
+
+function publishRapidNow(L) {
+  const { vol: v, cur } = merged(L);
+  postRapid(v, cur);
 }
 
 function publish(L) {
@@ -322,7 +338,9 @@ self.onmessage = async (ev) => {
       live = { site: msg.site };
       runLive(live);
     } else if (msg.type === 'rapid-config') {
-      rapid = { on: msg.on, rangeKm: msg.rangeKm, size: msg.size || 1024 };
+      rapid = { mode: msg.mode, rangeKm: msg.rangeKm, size: msg.size || 1024 };
+      lastRapidKey = '';
+      if (live && live.acc) publishRapidNow(live);
     } else if (msg.type === 'live-stop') {
       live = null;
     } else if (msg.type === 'build') {

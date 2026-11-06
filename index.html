@@ -87,6 +87,7 @@
   .leaflet-container { font: 12px system-ui, sans-serif; }
   #attrib { position: fixed; left: 340px; bottom: 6px; font-size: 11px; color: var(--muted); background: rgba(10,14,19,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
   #attrib:empty { display: none; }
+  button.linkish { height: auto; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; font-size: 12px; }
   fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   fieldset:disabled { opacity: .45; }
 
@@ -155,7 +156,9 @@
     </div>
     <div class="row"><span class="grow small">Map</span>
       <select id="basemap" style="width:auto"><option value="osm" selected>OpenStreetMap</option><option value="dark">Dark (OSM data)</option><option value="lines">Outlines only</option></select></div>
-    <label class="check"><input type="checkbox" id="rapidOn" checked> Rapid scan overlay (live: draws the low tilt as it is scanned)</label>
+    <div class="row"><span class="grow small">Rapid scan (live)</span>
+      <select id="rapidMode" style="width:auto"><option value="low" selected>Lowest tilt</option><option value="follow">Follow the radar (every tilt)</option><option value="off">Off</option></select></div>
+    <div class="small" id="rapidInfo" aria-live="polite"></div>
     <div class="row"><button id="loop" aria-pressed="false" class="grow">Play low-level loop</button></div>
     <div class="small" id="loopInfo" aria-live="polite"></div>
     <label class="check"><input type="checkbox" id="warn" checked> Warning polygons</label>
