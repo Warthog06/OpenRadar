@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { listDay, radarSites, warningsAt, basemap } from './sources.js';
 import { REF_COLORS } from './volume.js';
+import { openPicker } from './picker.js';
 
 // ---------------- config ----------------
 const LEVELS = {
@@ -567,6 +568,21 @@ function syncGroundButtons() {
 function bind() {
   $('site').addEventListener('change', e => { state.site = e.target.value; state.live ? loadLatest() : setNote('Press “Live” or pick a time to load this radar.'); });
   $('live').addEventListener('click', () => { setLive(true); loadLatest(); });
+  $('openPicker').addEventListener('click', () => {
+    document.body.classList.remove('panel-open');
+    openPicker({
+      sites: state.sites, current: state.site,
+      timeMs: state.live || !state.meta ? Date.now() : state.meta.lowTime,
+      onPick: id => {
+        state.site = id; $('site').value = id;
+        // live stays live; when browsing history, jump to the same moment on the new radar
+        if (state.live || !state.meta) { setLive(true); loadLatest(); }
+        else loadAt(state.meta.lowTime);
+      },
+    });
+  });
+  $('pickerClose').addEventListener('click', () => $('picker').close());
+  $('picker').addEventListener('click', e => { if (e.target === $('picker')) $('picker').close(); });
   $('go').addEventListener('click', () => {
     const d = $('date').value, t = $('time').value || '00:00';
     if (!d) return setNote('Pick a date first.', true);

@@ -82,6 +82,8 @@ export function basemap() {
         counties: topojson.mesh(topo, topo.objects.counties, (a, b) => a !== b && ((a.id / 1000) | 0) === ((b.id / 1000) | 0)),
         states: topojson.mesh(topo, topo.objects.states, (a, b) => a !== b),
         nation: topojson.mesh(topo, topo.objects.nation),
+        stateShapes: topojson.feature(topo, topo.objects.states),
+        nationShape: topojson.feature(topo, topo.objects.nation),
       };
     })().catch(e => { basemapPromise = null; throw e; });
   }

@@ -19,6 +19,7 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 
 - Real-time live mode for any of the ~160 WSR-88D radars. It streams the radar's real-time chunks, so each tilt shows up seconds after the radar finishes it, not 5–10 min later. The 3D view updates as a rolling volume, using the newest copy of every tilt. The HUD shows the tilt being scanned and how far through the volume the radar is.
 - Low-level loop: animates the recent lowest-tilt scans (reflectivity or velocity), including the extra SAILS / MESO-SAILS scans the radar takes every 1–2 min in severe weather. Earlier volumes are fetched with HTTP range requests, so only about 3 MB of each is downloaded.
+- Map picker: choose a radar by clicking it on a US map. The map shows the warning polygons in effect, so you can see where the storms are. In archive mode it jumps to the same moment on the new radar.
 - Archive mode: any date back to the 1990s, plus historical tornado presets. Step through scans with ◀ ▶.
 - 3D reflectivity surfaces at selectable dBZ levels, with vertical exaggeration, opacity and a cutaway plane.
 - Ground layer showing lowest-tilt reflectivity or velocity, county and state lines, and warning polygons valid at the scan time.
@@ -35,6 +36,7 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 | `js/worker.js` | Runs download, decode and meshing off the main thread; real-time chunk polling; loop frames |
 | `js/sources.js` | Data sources (all free, no keys) |
 | `js/main.js` | three.js scene, map drawing, UI |
+| `js/picker.js` | US map radar picker (d3-geo Albers USA) |
 
 ## Data sources (all free, no key)
 
@@ -42,7 +44,7 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 - Radar site list: NWS API (`api.weather.gov/radar/stations`)
 - Warning polygons (live and historical): Iowa Environmental Mesonet `sbw.geojson`
 - Boundaries: US Census via `us-atlas` (jsDelivr)
-- 3D engine: three.js (jsDelivr)
+- 3D engine: three.js (jsDelivr); map projection: d3-geo (jsDelivr)
 
 ## Known limitations
 

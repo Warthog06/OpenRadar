@@ -71,7 +71,29 @@
   #togglePanel { display: none; position: fixed; left: 16px; bottom: 16px; z-index: 5; background: var(--panel); }
   .help { position: fixed; right: 16px; top: 44px; font-size: 12px; color: var(--muted); text-align: right; pointer-events: none; }
 
+  #picker { width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; background: #0f141b; color: var(--text); border: 1px solid var(--line); border-radius: 14px; overflow: auto; }
+  #picker::backdrop { background: rgba(3, 6, 10, 0.7); }
+  .pk-head { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #0f141b; z-index: 1; }
+  .pk-head h2 { font-size: 15px; margin: 0; white-space: nowrap; }
+  .pk-head .small { flex: 1; }
+  #pickerMap { position: relative; padding: 8px 12px 0; }
+  #pickerMap svg { display: block; width: 100%; height: auto; }
+  .pk-states path { fill: #19212c; stroke: #3a4757; stroke-width: 0.8; }
+  .pk-site { cursor: pointer; outline: none; }
+  .pk-site .hit { fill: transparent; }
+  .pk-site .dot { fill: var(--accent); stroke: #0a0e13; stroke-width: 1.5; transition: r .1s; }
+  .pk-site text { font: 600 9px system-ui, sans-serif; fill: #9fb0c4; pointer-events: none; paint-order: stroke; stroke: #0f141b; stroke-width: 3px; }
+  .pk-site:hover .dot, .pk-site:focus-visible .dot { r: 7; fill: #fff; }
+  .pk-site:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
+  .pk-site.current .dot { fill: #ff4d4d; }
+  .pk-site.current text { fill: #ffd9d9; font-size: 11px; }
+  #pickerTip { position: absolute; transform: translate(-50%, calc(-100% - 14px)); background: #000c; border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; font-size: 12px; pointer-events: none; white-space: nowrap; }
+  #pickerOther { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 16px 14px; }
+  #pickerOther button { height: 28px; padding: 2px 8px; font-size: 12px; }
+
   @media (max-width: 760px) {
+    .pk-site text { display: none; }
+    .pk-head { flex-wrap: wrap; }
     #view { left: 0; width: 100vw; }
     #hud { left: 16px; top: 10px; font-size: 13px; }
     .help { display: none; }
@@ -102,6 +124,7 @@
   <section>
     <h2>Radar</h2>
     <div class="row"><select id="site" class="grow" aria-label="Radar site"></select><button id="nearest" title="Nearest radar to me" aria-label="Nearest radar">⌖</button></div>
+    <div class="row"><button id="openPicker" class="grow">Choose radar on map</button></div>
     <div class="row"><button id="live" class="primary grow" aria-pressed="false">Live (real-time)</button></div>
     <div class="row"><input type="date" id="date" class="grow" aria-label="Date (UTC)"><input type="time" id="time" aria-label="Time (UTC)"><button id="go">Load</button></div>
     <select id="preset" aria-label="Historical cases"></select>
@@ -156,6 +179,17 @@
 <div id="status" hidden><span id="statusText">Loading…</span><div id="statusTrack"><div id="statusBar"></div></div></div>
 <div id="viewbtns"><button data-view="3d">3D</button><button data-view="top">Top</button><button data-view="side">Side</button></div>
 <button id="togglePanel" aria-expanded="false">Controls</button>
+
+<dialog id="picker" aria-labelledby="pickerTitle">
+  <div class="pk-head">
+    <h2 id="pickerTitle">Choose a radar</h2>
+    <span class="small" id="pickerInfo"></span>
+    <button id="pickerClose" aria-label="Close">✕</button>
+  </div>
+  <div id="pickerMap"></div>
+  <div id="pickerTip" hidden></div>
+  <div id="pickerOther"></div>
+</dialog>
 
 <script type="module" src="js/main.js"></script>
 </body>
