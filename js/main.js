@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { listDay, radarSites, warningsAt, basemap } from './sources.js';
 import { REF_COLORS } from './volume.js';
 import { openPicker } from './picker.js';
+import { renderBasemap, BASEMAPS } from './tiles.js';
 
 // ---------------- config ----------------
 const LEVELS = {
@@ -27,6 +28,7 @@ const state = {
   rangeKm: 150, detail: 'normal', ccFilter: true, extendToGround: true, smooth: true,
   groundLayer: 'REF', showWarnings: true, cutAxis: 'off', cutPos: 0,
   ground: null, warnings: [], sites: [], autoFocus: true, archiveFiles: [],
+  basemap: 'osm', show3d: true, rapidOn: true, rapid: {},
 };
 
 const $ = id => document.getElementById(id);
@@ -232,28 +234,50 @@ let overlayKey = '', radarKey = '', groundVersion = 0;
 // County/state lines + range rings, redrawn only when the site or range changes.
 function buildOverlay() {
   const S = groundCanvas.width;
-  const key = `${state.meta.icao}|${state.rangeKm}|${!!mapLines}`;
+  const key = `${state.meta.icao}|${state.rangeKm}|${!!mapLines}|${state.basemap}`;
   if (key === overlayKey) return;
   overlayKey = key;
   overlay.width = overlay.height = S;
   const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, S, S);
-  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1.5;
+  ctx.strokeStyle = state.basemap === 'osm' ? 'rgba(20,30,45,0.35)' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1.5;
   for (let r = 50; r <= state.rangeKm * 1.42; r += 50) {
     ctx.beginPath(); ctx.arc(S / 2, S / 2, r / (2 * state.rangeKm) * S, 0, Math.PI * 2); ctx.stroke();
   }
-  if (mapLines) {
+  if (mapLines && state.basemap === 'lines') {
     ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(150,165,185,0.30)'; ctx.lineWidth = 1.2; strokeLines(ctx, mapLines.counties);
     ctx.strokeStyle = 'rgba(215,225,240,0.75)'; ctx.lineWidth = 2.6; strokeLines(ctx, mapLines.states); strokeLines(ctx, mapLines.nation);
   }
 }
 
+// OpenStreetMap tiles under the radar, re-rendered when the site, range or style changes.
+const tileCanvas = document.createElement('canvas');
+let tileKey = '', tileReady = false;
+function ensureTiles() {
+  if (state.basemap === 'lines' || !state.meta || !state.meta.site) return;
+  const key = `${state.basemap}|${state.meta.icao}|${state.rangeKm}`;
+  if (key === tileKey) return;
+  tileKey = key; tileReady = false;
+  tileCanvas.width = tileCanvas.height = groundCanvas.width;
+  renderBasemap(tileCanvas, state.basemap, state.meta.site, state.rangeKm)
+    .then(r => {
+      if (tileKey !== key) return;
+      tileReady = true; drawGround();
+      if (r.missing === r.total) setNote('Map tiles unavailable (offline?)');
+    });
+}
+
+const rapidCanvas = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
+
 function drawGround() {
   const ctx = groundCanvas.getContext('2d');
   const S = groundCanvas.width;
   ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
+  $('attrib').textContent = state.basemap === 'lines' ? '' : BASEMAPS[state.basemap].attribution;
   if (!state.meta) { groundTex.needsUpdate = true; return; }
+  ensureTiles();
+  if (state.basemap !== 'lines' && tileReady) ctx.drawImage(tileCanvas, 0, 0);
   let src = null;
   if (state.groundLayer !== 'off') {
     if (loop.playing && loop.bitmaps.length) src = loop.bitmaps[loop.i];
@@ -268,6 +292,10 @@ function drawGround() {
     }
   }
   if (src) { ctx.imageSmoothingEnabled = false; ctx.drawImage(src, 0, 0, S, S); }
+  // rapid scan: newest radials of the low tilt that is still being scanned, plus the beam line
+  const r = state.rapid[state.groundLayer];
+  const showRapid = r && state.rapidOn && state.live && !loop.playing && r.rangeKm === state.rangeKm;
+  if (showRapid) ctx.drawImage(rapidCanvas[state.groundLayer], 0, 0, S, S);
   buildOverlay();
   ctx.drawImage(overlay, 0, 0);
   if (state.showWarnings) {
@@ -278,6 +306,12 @@ function drawGround() {
       ctx.strokeStyle = '#000'; ctx.lineWidth = 7; ctx.stroke();
       ctx.strokeStyle = col; ctx.lineWidth = 4; ctx.stroke();
     }
+  }
+  if (showRapid) {
+    const a = r.lastAz * Math.PI / 180, len = S * 0.75;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(S / 2, S / 2); ctx.lineTo(S / 2 + Math.sin(a) * len, S / 2 - Math.cos(a) * len); ctx.stroke();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.stroke();
   }
   // radar site marker
   ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(S / 2, S / 2, 7, 0, Math.PI * 2); ctx.fill();
@@ -300,6 +334,16 @@ worker.onmessage = ev => {
   if (m.type === 'note') return setNote(m.message);
   if (m.type === 'live-status') return updateLiveStatus(m);
   if (m.type === 'loop') return receiveLoop(m);
+  if (m.type === 'rapid') {
+    if (!state.live || !state.rapidOn) return;
+    const c = rapidCanvas[m.moment];
+    c.width = c.height = m.size;
+    c.getContext('2d').putImageData(new ImageData(m.img, m.size, m.size), 0, 0);
+    state.rapid[m.moment] = { time: m.time, lastAz: m.lastAz, rangeKm: m.rangeKm };
+    $('scan').dataset.rapid = '1';
+    updateStamp();
+    return drawGround();
+  }
   if (m.type === 'error') { busy = false; quietBuild = false; hideProgress(); return setNote(`Error: ${m.message}`, true); }
   if (m.type === 'loaded') {
     if (m.meta.mode === 'live' && !state.live) return; // stale message after leaving live mode
@@ -315,7 +359,13 @@ worker.onmessage = ev => {
     if (m.id < latestBuild) return;
     if (m.type === 'built') {
       clearMeshes();
-      if (m.ground) { state.ground = m.ground; groundVersion++; setGroundSize(); drawGround(); }
+      if (m.ground) {
+        state.ground = m.ground; groundVersion++;
+        // a finished low tilt replaces its rapid-scan preview
+        if (state.rapid.REF && m.ground.refTime >= state.rapid.REF.time) delete state.rapid.REF;
+        if (state.rapid.VEL && m.ground.velTime >= state.rapid.VEL.time) delete state.rapid.VEL;
+        setGroundSize(); drawGround();
+      }
       $('tilts').textContent = `${m.tilts.length} tilts: ${m.tilts.join('°, ')}°`;
     }
     for (const mesh of m.meshes) setMesh(mesh);
@@ -325,7 +375,7 @@ worker.onmessage = ev => {
     hideProgress();
     if (pendingBuild) { pendingBuild = false; quietBuild = state.live; requestBuild(true); }
     const tris = [...meshes.values()].reduce((a, x) => a + (x.geometry.index ? x.geometry.index.count / 3 : 0), 0);
-    setNote(tris ? `${(tris / 1000).toFixed(0)}k triangles` : 'No echoes at the selected levels in this volume.');
+    setNote(!state.show3d ? '3D storms off: 2D radar view.' : tris ? `${(tris / 1000).toFixed(0)}k triangles` : 'No echoes at the selected levels in this volume.');
   }
 };
 
@@ -341,11 +391,11 @@ function requestBuild(withGround) {
   if (!state.meta) return;
   latestBuild = ++reqId;
   busy = true;
-  worker.postMessage({ type: 'build', id: reqId, opts: gridOpts(), levels: [...state.levels], ground: withGround, groundSize: 1536 });
+  worker.postMessage({ type: 'build', id: reqId, opts: gridOpts(), levels: state.show3d ? [...state.levels] : [], ground: withGround, groundSize: 1536 });
 }
 
 function requestLevel(level) {
-  if (!state.meta || meshes.has(level)) return;
+  if (!state.meta || meshes.has(level) || !state.show3d) return;
   worker.postMessage({ type: 'iso', id: latestBuild, levels: [level] });
 }
 
@@ -498,7 +548,9 @@ function updateStamp() {
   $('stamp').textContent = `${m.icao}${site ? ' · ' + site.name : ''} · ${fmtTime(t)} · VCP ${m.vcp ?? '?'}`;
   const age = Math.max(0, Date.now() - t);
   const isLive = m.mode === 'live' && state.live;
-  $('age').textContent = isLive ? `LIVE · ${age < 90000 ? Math.round(age / 1000) + ' s' : Math.round(age / 60000) + ' min'} old`
+  const rapidNow = isLive && state.rapidOn && state.rapid[state.groundLayer];
+  $('age').textContent = rapidNow ? 'LIVE · low tilt scanning now'
+    : isLive ? `LIVE · ${age < 90000 ? Math.round(age / 1000) + ' s' : Math.round(age / 60000) + ' min'} old`
     : age < 3 * 3600e3 ? `${Math.round(age / 60000)} min old` : 'archive';
   $('age').classList.toggle('live', isLive);
   if (!isLive) $('scan').textContent = '';
@@ -545,7 +597,12 @@ function buildLegend() {
   $('legendTicks').innerHTML = REF_COLORS.filter((_, i) => i % 2 === 1).map(([t]) => `<span>${t}</span>`).join('');
 }
 
+function sendRapidConfig() {
+  worker.postMessage({ type: 'rapid-config', on: state.rapidOn, rangeKm: state.rangeKm, size: 1024 });
+}
+
 function setLive(on) {
+  state.rapid = {};
   if (!on && state.live) worker.postMessage({ type: 'live-stop' });
   state.live = on;
   $('live').classList.toggle('on', on);
@@ -571,7 +628,8 @@ function bind() {
   $('openPicker').addEventListener('click', () => {
     document.body.classList.remove('panel-open');
     openPicker({
-      sites: state.sites, current: state.site,
+      sites: state.sites, current: state.site, basemap: state.basemap,
+      live: state.live || !state.meta,
       timeMs: state.live || !state.meta ? Date.now() : state.meta.lowTime,
       onPick: id => {
         state.site = id; $('site').value = id;
@@ -619,9 +677,18 @@ function bind() {
     drawGround();
   });
   $('loop').addEventListener('click', () => (loop.playing ? stopLoop() : startLoop()));
+  $('basemap').addEventListener('change', e => { state.basemap = e.target.value; tileKey = ''; drawGround(); });
+  $('rapidOn').addEventListener('change', e => { state.rapidOn = e.target.checked; state.rapid = {}; sendRapidConfig(); drawGround(); });
+  $('show3d').addEventListener('change', e => {
+    state.show3d = e.target.checked;
+    storm.visible = ruler.visible = state.show3d;
+    document.getElementById('surfaces').disabled = !state.show3d;
+    if (state.show3d) { requestBuild(false); view('3d'); }
+    else { clearMeshes(); view('top'); setNote('3D storms off: 2D radar view.'); }
+  });
   $('warn').addEventListener('change', e => { state.showWarnings = e.target.checked; loadWarnings(); });
 
-  $('range').addEventListener('change', e => { state.rangeKm = +e.target.value; requestBuild(true); view('3d'); if (loop.playing) requestLoop(); });
+  $('range').addEventListener('change', e => { state.rangeKm = +e.target.value; state.rapid = {}; sendRapidConfig(); requestBuild(true); view('3d'); if (loop.playing) requestLoop(); });
   $('detail').addEventListener('change', e => { state.detail = e.target.value; requestBuild(false); });
   $('cc').addEventListener('change', e => { state.ccFilter = e.target.checked; requestBuild(false); });
   $('extend').addEventListener('change', e => { state.extendToGround = e.target.checked; requestBuild(false); });
@@ -639,6 +706,7 @@ buildLevelChips();
 buildLegend();
 $('preset').innerHTML = '<option value="">Historical cases…</option>' + PRESETS.map((p, i) => `<option value="${i}">${p.label}</option>`).join('');
 bind();
+sendRapidConfig();
 setGroundSize();
 view('3d');
 drawGround();

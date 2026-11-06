@@ -174,9 +174,31 @@ function liveStatus(L, cur) {
   };
 }
 
+// Rapid scan overlay: draw the lowest tilt while it is still being scanned, so the newest
+// radials appear every few seconds on top of the previous complete scan.
+let rapid = { on: true, rangeKm: 150, size: 1024 };
+function postRapid(v, cur) {
+  if (!rapid.on) return;
+  const active = cur.sweeps.find(s => !s.complete);
+  if (!active) return;
+  const low = lowestSweep(v, 'REF');
+  const lowAngle = low ? low.angle : active.angle;
+  if (Math.abs(active.angle - lowAngle) > 0.25) return;
+  // surveillance cut -> reflectivity; Doppler cut -> velocity
+  const moments = active.moments.VEL ? ['VEL'] : ['REF'];
+  for (const moment of moments) {
+    const ms = active.moments[moment];
+    if (!ms) continue;
+    const img = sweepImage(ms, active.angle, moment, rapid.rangeKm, rapid.size);
+    post({ type: 'rapid', moment, img, size: rapid.size, rangeKm: rapid.rangeKm, time: active.time,
+      lastAz: ms.az[ms.n - 1], angle: active.angle }, [img.buffer]);
+  }
+}
+
 function publish(L) {
   const { vol: v, cur } = merged(L);
   post(liveStatus(L, cur));
+  postRapid(v, cur);
   const complete = cur.sweeps.filter(s => s.complete).length + (L.prev ? 1000 : 0);
   if (complete === L.lastComplete || !v.site) return;
   L.lastComplete = complete;
@@ -299,6 +321,8 @@ self.onmessage = async (ev) => {
     } else if (msg.type === 'live-start') {
       live = { site: msg.site };
       runLive(live);
+    } else if (msg.type === 'rapid-config') {
+      rapid = { on: msg.on, rangeKm: msg.rangeKm, size: msg.size || 1024 };
     } else if (msg.type === 'live-stop') {
       live = null;
     } else if (msg.type === 'build') {

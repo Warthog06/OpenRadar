@@ -1,131 +1,125 @@
-// Map-based radar picker: a US map with every WSR-88D site as a clickable dot,
-// plus the warning polygons in effect so you can see where the storms are.
-import { basemap, warningsAt } from './sources.js';
+// Map-based radar picker (Leaflet): zoomable map with every WSR-88D site, the national
+// radar mosaic ("quilt" of all radars) and the warning polygons in effect.
+import { warningsAt } from './sources.js';
+import { BASEMAPS } from './tiles.js';
 
-const W = 975, H = 610;
-const SVGNS = 'http://www.w3.org/2000/svg';
+const LEAFLET = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/';
 const WARN_COLORS = { TO: '#ff3030', SV: '#ffd21f', FF: '#2bff6a', EW: '#ff8c00', SQ: '#bde8ff', MA: '#ff9ad5' };
-
-let d3geo = null;
-const el = (tag, attrs = {}) => {
-  const n = document.createElementNS(SVGNS, tag);
-  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
-  return n;
+const REGIONS = {
+  'Lower 48': [[24, -125], [49.5, -66]],
+  Alaska: [[51, -170], [71, -130]],
+  Hawaii: [[18.5, -161], [22.5, -154]],
+  'Puerto Rico': [[17.5, -68], [19, -65]],
+  Guam: [[12.8, 144.2], [14, 145.3]],
 };
 
+let L = null, map = null, opened = false;
+const layers = {};
+let current = null; // options of the latest open() call
+
+async function loadLeaflet() {
+  if (L) return L;
+  const css = document.createElement('link');
+  css.rel = 'stylesheet'; css.href = LEAFLET + 'leaflet.css';
+  document.head.appendChild(css);
+  L = await import(LEAFLET + 'leaflet-src.esm.js');
+  return L;
+}
+
+// IEM national base-reflectivity mosaic tiles, current or at a past 5-minute time.
+function mosaicUrl(timeMs, live) {
+  if (live) return `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png?_=${Math.floor(Date.now() / 300000)}`;
+  const ts = new Date(Math.floor(timeMs / 300000) * 300000).toISOString().replace(/[-:T]/g, '').slice(0, 12);
+  return `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-${ts}/{z}/{x}/{y}.png`;
+}
+
+function buildMap(box) {
+  map = L.map(box, { zoomSnap: 0.5, minZoom: 2, maxZoom: 9, worldCopyJump: true });
+  map.attributionControl.setPrefix(false);
+  map.on('zoomend', () => box.classList.toggle('show-labels', map.getZoom() >= 5));
+  const nav = document.getElementById('pickerRegions');
+  nav.innerHTML = '';
+  for (const [name, b] of Object.entries(REGIONS)) {
+    const btn = document.createElement('button');
+    btn.textContent = name;
+    btn.addEventListener('click', () => map.fitBounds(b));
+    nav.appendChild(btn);
+  }
+  document.getElementById('pickerMosaic').addEventListener('change', e => {
+    if (!layers.mosaic) return;
+    if (e.target.checked) layers.mosaic.addTo(map); else map.removeLayer(layers.mosaic);
+  });
+}
+
 /**
- * opts: { sites: [{id,name,lat,lon}], current: 'KTLX', timeMs, onPick(id) }
+ * o: { sites, current, timeMs, live, basemap: 'osm'|'dark'|'lines', onPick(id) }
  */
-export async function openPicker(opts) {
+export async function openPicker(o) {
+  current = o;
   const dlg = document.getElementById('picker');
   const box = document.getElementById('pickerMap');
-  const other = document.getElementById('pickerOther');
   const info = document.getElementById('pickerInfo');
-  const tip = document.getElementById('pickerTip');
-  box.innerHTML = '<p class="small" style="padding:24px">Loading map…</p>';
-  other.innerHTML = '';
   if (!dlg.open) dlg.showModal();
-
-  try {
-    if (!d3geo) d3geo = await import('https://cdn.jsdelivr.net/npm/d3-geo@3.1.1/+esm');
-  } catch {
-    box.innerHTML = '<p class="small" style="padding:24px">Map unavailable offline. Use the list instead.</p>';
+  info.textContent = 'Loading map…';
+  try { await loadLeaflet(); } catch {
+    info.textContent = 'Map unavailable (offline?). Use the list instead.';
     return;
   }
-  const map = await basemap();
-  const proj = d3geo.geoAlbersUsa().fitSize([W, H], map.nationShape);
-  const path = d3geo.geoPath(proj);
+  if (!map) buildMap(box);
+  map.invalidateSize();
+  for (const k of Object.keys(layers)) { map.removeLayer(layers[k]); delete layers[k]; }
 
-  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'group', 'aria-label': 'Map of US radar sites' });
-  const gStates = el('g', { class: 'pk-states' });
-  for (const f of map.stateShapes.features) { const d = path(f); if (d) gStates.appendChild(el('path', { d })); }
-  svg.appendChild(gStates);
-  const gWarn = el('g', { class: 'pk-warn' });
-  svg.appendChild(gWarn);
-  const gSites = el('g', { class: 'pk-sites' });
-  svg.appendChild(gSites);
+  // basemap (OpenStreetMap data); the outline-only 3D style uses the dark map here
+  const b = BASEMAPS[o.basemap] || BASEMAPS.dark;
+  layers.base = L.tileLayer(b.url, { subdomains: b.subdomains || 'abc', maxZoom: 19, attribution: b.attribution }).addTo(map);
 
-  const offMap = [];
-  const pick = id => { dlg.close(); opts.onPick(id); };
-  const showTip = (s, x, y) => {
-    tip.hidden = false;
-    tip.textContent = `${s.id} · ${s.name}`;
-    const sr = svg.getBoundingClientRect(), dr = dlg.getBoundingClientRect();
-    tip.style.left = `${sr.left - dr.left + dlg.scrollLeft + (x / W) * sr.width}px`;
-    tip.style.top = `${sr.top - dr.top + dlg.scrollTop + (y / H) * sr.height}px`;
-  };
-
-  const placed = [];
-  for (const s of opts.sites) {
-    const p = proj([s.lon, s.lat]);
-    if (!p) { offMap.push(s); continue; }
-    placed.push({ s, x: p[0], y: p[1] });
-    const g = el('g', {
-      class: 'pk-site' + (s.id === opts.current ? ' current' : ''),
-      transform: `translate(${p[0].toFixed(1)},${p[1].toFixed(1)})`,
-      tabindex: '0', role: 'button', 'aria-label': `${s.id}, ${s.name}`,
-    });
-    g.appendChild(el('circle', { r: 13, class: 'hit' }));
-    g.appendChild(el('circle', { r: s.id === opts.current ? 6 : 4.2, class: 'dot' }));
-    const label = el('text', { x: 6, y: -6 });
-    label.textContent = s.id.slice(1);
-    g.appendChild(label);
-    g.addEventListener('click', () => pick(s.id));
-    g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(s.id); } });
-    g.addEventListener('pointerenter', () => showTip(s, p[0], p[1]));
-    g.addEventListener('focus', () => showTip(s, p[0], p[1]));
-    g.addEventListener('pointerleave', () => { tip.hidden = true; });
-    g.addEventListener('blur', () => { tip.hidden = true; });
-    gSites.appendChild(g);
-  }
-  box.innerHTML = '';
-  box.appendChild(svg);
-
-  // Touch-friendly: a tap that misses every dot picks the nearest radar within ~32 px.
-  svg.addEventListener('click', e => {
-    if (e.target.closest('.pk-site')) return;
-    const r = svg.getBoundingClientRect(), k = r.width / W;
-    let best = null, bd = 32;
-    for (const q of placed) {
-      const d = Math.hypot(r.left + q.x * k - e.clientX, r.top + q.y * k - e.clientY);
-      if (d < bd) { bd = d; best = q.s; }
-    }
-    if (best) pick(best.id);
+  // national radar mosaic: the "quilt" of every radar
+  layers.mosaic = L.tileLayer(mosaicUrl(o.timeMs, o.live), {
+    opacity: 0.75, maxNativeZoom: 8, maxZoom: 9,
+    attribution: 'Radar mosaic: <a href="https://mesonet.agron.iastate.edu/" target="_blank" rel="noopener">IEM</a>',
   });
+  if (document.getElementById('pickerMosaic').checked) layers.mosaic.addTo(map);
 
-  other.innerHTML = offMap.length ? '<span class="small">Outside the map:</span> ' : '';
-  for (const s of offMap.sort((a, b) => a.id.localeCompare(b.id))) {
-    const b = document.createElement('button');
-    b.textContent = s.id; b.title = s.name;
-    b.addEventListener('click', () => pick(s.id));
-    other.appendChild(b);
-  }
-  // keep the current site focused for keyboard users
-  const cur = gSites.querySelector('.current');
-  if (cur) {
-    gSites.appendChild(cur);
-    if (matchMedia('(pointer: fine)').matches) cur.focus({ preventScroll: true });
+  // radar sites
+  const renderer = L.canvas({ tolerance: 10 }); // generous tap target on phones
+  layers.sites = L.layerGroup().addTo(map);
+  for (const s of o.sites) {
+    const cur = s.id === o.current;
+    const m = L.circleMarker([s.lat, s.lon], {
+      renderer, radius: cur ? 7 : 5, weight: 1.5, color: '#0a0e13',
+      fillColor: cur ? '#ff4d4d' : '#3d9bff', fillOpacity: 1,
+    });
+    m.bindTooltip(s.id, { permanent: true, direction: 'right', className: 'pk-label' + (cur ? ' current' : ''), offset: [6, 0] });
+    m.on('mouseover', () => { info.textContent = `${s.id} · ${s.name}: click to load`; });
+    m.on('click', () => { dlg.close(); o.onPick(s.id); });
+    layers.sites.addLayer(m);
   }
 
-  // warnings in effect at the time being viewed
-  const t = opts.timeMs || Date.now();
-  info.textContent = 'Loading warnings…';
+  // first open: frame the lower 48 (or the current radar if it is outside it)
+  if (!opened) {
+    opened = true;
+    const cs = o.sites.find(s => s.id === o.current);
+    const inConus = cs && cs.lat > 24 && cs.lat < 50 && cs.lon > -125 && cs.lon < -66;
+    if (cs && !inConus) map.setView([cs.lat, cs.lon], 6); else map.fitBounds(REGIONS['Lower 48']);
+  }
+  box.classList.toggle('show-labels', map.getZoom() >= 5);
+
+  // warnings in effect at the viewed time
+  const when = o.live ? 'now' : 'at ' + new Date(o.timeMs).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  info.textContent = `Radar mosaic ${when} · loading warnings…`;
   try {
-    const warns = await warningsAt(t);
-    if (!dlg.open) return;
-    for (const w of warns) {
-      const d = path(w.geometry);
-      if (!d) continue;
-      const col = w.emergency ? '#ff00ff' : WARN_COLORS[w.phenomena] || '#fff';
-      gWarn.appendChild(el('path', { d, fill: col, 'fill-opacity': 0.35, stroke: col, 'stroke-width': 1.2 }));
-    }
+    const warns = await warningsAt(o.timeMs);
+    if (!dlg.open || current !== o) return;
+    layers.warn = L.geoJSON({ type: 'FeatureCollection', features: warns.map(w => ({ type: 'Feature', geometry: w.geometry, properties: w })) }, {
+      interactive: false,
+      style: f => { const c = f.properties.emergency ? '#ff00ff' : WARN_COLORS[f.properties.phenomena] || '#fff'; return { color: c, weight: 2, fillColor: c, fillOpacity: 0.15 }; },
+    }).addTo(map);
     const counts = {};
     for (const w of warns) counts[w.label] = (counts[w.label] || 0) + 1;
-    const when = new Date(t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-    info.textContent = warns.length
-      ? `Warnings at ${when}: ` + Object.entries(counts).map(([k, v]) => `${v} ${k}${v > 1 ? 's' : ''}`).join(', ')
-      : `No storm warnings in effect at ${when}.`;
+    info.textContent = `Radar mosaic ${when} · ` + (warns.length
+      ? Object.entries(counts).map(([k, v]) => `${v} ${k}${v > 1 ? 's' : ''}`).join(', ')
+      : 'no storm warnings in effect');
   } catch {
-    info.textContent = 'Warnings unavailable.';
+    info.textContent = `Radar mosaic ${when} · warnings unavailable`;
   }
 }

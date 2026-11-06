@@ -76,24 +76,23 @@
   .pk-head { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #0f141b; z-index: 1; }
   .pk-head h2 { font-size: 15px; margin: 0; white-space: nowrap; }
   .pk-head .small { flex: 1; }
-  #pickerMap { position: relative; padding: 8px 12px 0; }
-  #pickerMap svg { display: block; width: 100%; height: auto; }
-  .pk-states path { fill: #19212c; stroke: #3a4757; stroke-width: 0.8; }
-  .pk-site { cursor: pointer; outline: none; }
-  .pk-site .hit { fill: transparent; }
-  .pk-site .dot { fill: var(--accent); stroke: #0a0e13; stroke-width: 1.5; transition: r .1s; }
-  .pk-site text { font: 600 9px system-ui, sans-serif; fill: #9fb0c4; pointer-events: none; paint-order: stroke; stroke: #0f141b; stroke-width: 3px; }
-  .pk-site:hover .dot, .pk-site:focus-visible .dot { r: 7; fill: #fff; }
-  .pk-site:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
-  .pk-site.current .dot { fill: #ff4d4d; }
-  .pk-site.current text { fill: #ffd9d9; font-size: 11px; }
-  #pickerTip { position: absolute; transform: translate(-50%, calc(-100% - 14px)); background: #000c; border: 1px solid var(--line); padding: 3px 8px; border-radius: 6px; font-size: 12px; pointer-events: none; white-space: nowrap; }
-  #pickerOther { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 16px 14px; }
-  #pickerOther button { height: 28px; padding: 2px 8px; font-size: 12px; }
+  #pickerMap { height: min(68vh, 640px); margin: 0 12px 12px; border-radius: 10px; overflow: hidden; background: #1b222c; }
+  .pk-tools { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; justify-content: space-between; padding: 8px 12px; }
+  #pickerRegions { display: flex; flex-wrap: wrap; gap: 6px; }
+  #pickerRegions button { height: 28px; padding: 2px 10px; font-size: 12px; }
+  .leaflet-tooltip.pk-label { display: none; background: rgba(10,14,19,.8); color: #dbe5f0; border: 0; box-shadow: none; padding: 0 4px; font: 600 11px system-ui, sans-serif; }
+  .leaflet-tooltip.pk-label::before { display: none; }
+  .show-labels .leaflet-tooltip.pk-label, .leaflet-tooltip.pk-label.current { display: block; }
+  .leaflet-tooltip.pk-label.current { background: #ff4d4d; color: #fff; }
+  .leaflet-container { font: 12px system-ui, sans-serif; }
+  #attrib { position: fixed; left: 340px; bottom: 6px; font-size: 11px; color: var(--muted); background: rgba(10,14,19,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
+  #attrib:empty { display: none; }
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  fieldset:disabled { opacity: .45; }
 
   @media (max-width: 760px) {
-    .pk-site text { display: none; }
     .pk-head { flex-wrap: wrap; }
+    #attrib { left: 8px; bottom: 60px; }
     #view { left: 0; width: 100vw; }
     #hud { left: 16px; top: 10px; font-size: 13px; }
     .help { display: none; }
@@ -134,6 +133,8 @@
 
   <section>
     <h2>3D reflectivity surfaces (dBZ)</h2>
+    <label class="check"><input type="checkbox" id="show3d" checked> Show 3D storms</label>
+    <fieldset id="surfaces">
     <div class="chips" id="levels"></div>
     <div class="row small" style="margin-top:10px"><span class="grow">Vertical exaggeration</span><span id="exagVal">3×</span></div>
     <input type="range" id="exag" min="1" max="8" step="0.5" value="3" aria-label="Vertical exaggeration">
@@ -142,6 +143,7 @@
     <div class="row small"><span class="grow">Cutaway</span>
       <select id="cutAxis" style="width:auto"><option value="off">Off</option><option value="ns">Remove north of…</option><option value="ew">Remove east of…</option></select></div>
     <input type="range" id="cutPos" min="-1" max="1" step="0.005" value="0" disabled aria-label="Cutaway position">
+    </fieldset>
   </section>
 
   <section>
@@ -151,6 +153,9 @@
       <button data-ground="VEL" aria-pressed="false">Velocity</button>
       <button data-ground="off" aria-pressed="false">Off</button>
     </div>
+    <div class="row"><span class="grow small">Map</span>
+      <select id="basemap" style="width:auto"><option value="osm" selected>OpenStreetMap</option><option value="dark">Dark (OSM data)</option><option value="lines">Outlines only</option></select></div>
+    <label class="check"><input type="checkbox" id="rapidOn" checked> Rapid scan overlay (live: draws the low tilt as it is scanned)</label>
     <div class="row"><button id="loop" aria-pressed="false" class="grow">Play low-level loop</button></div>
     <div class="small" id="loopInfo" aria-live="polite"></div>
     <label class="check"><input type="checkbox" id="warn" checked> Warning polygons</label>
@@ -172,11 +177,12 @@
   <footer>
     Radar: NOAA NEXRAD Level II via <a href="https://registry.opendata.aws/noaa-nexrad/" target="_blank" rel="noopener">AWS Open Data</a> ·
     Warnings: <a href="https://mesonet.agron.iastate.edu/" target="_blank" rel="noopener">Iowa Environmental Mesonet</a> ·
-    Sites: NWS API · Map: US Census (us-atlas). Not for life-safety decisions.
+    Sites: NWS API · Map: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, CARTO, US Census · Radar mosaic: IEM. Not for life-safety decisions.
   </footer>
 </aside>
 
 <div id="status" hidden><span id="statusText">Loading…</span><div id="statusTrack"><div id="statusBar"></div></div></div>
+<div id="attrib"></div>
 <div id="viewbtns"><button data-view="3d">3D</button><button data-view="top">Top</button><button data-view="side">Side</button></div>
 <button id="togglePanel" aria-expanded="false">Controls</button>
 
@@ -186,9 +192,11 @@
     <span class="small" id="pickerInfo"></span>
     <button id="pickerClose" aria-label="Close">✕</button>
   </div>
+  <div class="pk-tools">
+    <div id="pickerRegions"></div>
+    <label class="check"><input type="checkbox" id="pickerMosaic" checked> National radar mosaic</label>
+  </div>
   <div id="pickerMap"></div>
-  <div id="pickerTip" hidden></div>
-  <div id="pickerOther"></div>
 </dialog>
 
 <script type="module" src="js/main.js"></script>
