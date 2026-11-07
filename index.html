@@ -88,6 +88,24 @@
   #attrib { position: fixed; left: 340px; bottom: 6px; font-size: 11px; color: var(--muted); background: rgba(10,14,19,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
   #attrib:empty { display: none; }
   button.linkish { height: auto; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; font-size: 12px; }
+  .badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 99px; background: #ff4d4d; color: #fff; font-size: 11px; line-height: 17px; }
+  .alert-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .alert-list button { width: 100%; height: auto; text-align: left; display: grid; grid-template-columns: 6px 1fr; gap: 2px 10px; padding: 8px 10px; white-space: normal; }
+  .alert-list .sw { grid-row: span 2; border-radius: 3px; background: var(--c); }
+  .alert-list .t { font-weight: 600; }
+  .alert-list .m { font-size: 12px; color: var(--muted); }
+  .alert-list button.sel { border-color: var(--accent); background: #16202d; }
+  #alertCard { position: fixed; right: 16px; top: 64px; width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 140px); display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; z-index: 6; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  #alertCard[hidden] { display: none; }
+  .ac-head { display: flex; align-items: center; gap: 10px; }
+  .ac-head h2 { flex: 1; margin: 0; font-size: 15px; }
+  .ac-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .ac-meta { font-size: 12px; color: var(--muted); }
+  .ac-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ac-tags span { font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); }
+  .ac-tags span.hot { border-color: #ff4d4d; color: #ffd9d9; background: rgba(255,60,60,.15); }
+  #acLink { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #acText { margin: 0; overflow: auto; flex: 1; min-height: 80px; white-space: pre-wrap; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: #0b1016; border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 -16px; padding: 0 16px; }
   .tabs button { flex: 1; height: 34px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--muted); font-weight: 600; }
   .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
@@ -108,6 +126,8 @@
     #attrib { left: 8px; bottom: 60px; }
     #view { left: 0; width: 100vw; }
     #splitUI { left: 0; }
+    #alertCard { top: auto; bottom: 64px; right: 16px; max-height: 55vh; }
+    .tabs button { font-size: 13px; padding: 0 4px; }
     #hud { left: 16px; top: 10px; font-size: 13px; }
     .help { display: none; }
     #panel { top: auto; width: 100%; max-height: 62vh; border-right: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; transform: translateY(105%); transition: transform .2s; z-index: 4; }
@@ -136,6 +156,7 @@
 
   <div class="tabs" role="tablist" aria-label="Panel">
     <button role="tab" id="tab-radar" aria-controls="pane-radar" aria-selected="true">Radar</button>
+    <button role="tab" id="tab-alerts" aria-controls="pane-alerts" aria-selected="false" tabindex="-1">Alerts <span id="alertCount" class="badge" hidden></span></button>
     <button role="tab" id="tab-3d" aria-controls="pane-3d" aria-selected="false" tabindex="-1">3D</button>
     <button role="tab" id="tab-settings" aria-controls="pane-settings" aria-selected="false" tabindex="-1">Settings</button>
   </div>
@@ -162,6 +183,20 @@
       <div class="row"><button id="loop" aria-pressed="false" class="grow">Play low-level loop</button></div>
       <div class="small" id="loopInfo" aria-live="polite"></div>
       <div id="legend" aria-hidden="true"></div><div id="legendTicks" aria-hidden="true"></div>
+    </section>
+  </div>
+
+  <div role="tabpanel" id="pane-alerts" aria-labelledby="tab-alerts" hidden>
+    <section>
+      <div class="row"><select id="alertFilter" class="grow" aria-label="Filter alerts">
+        <option value="severe" selected>Tornado &amp; severe storm warnings</option>
+        <option value="warnings">All warnings</option>
+        <option value="all">Warnings + advisories</option>
+        <option value="near">Near this radar</option>
+      </select></div>
+      <div class="small" id="alertSummary" aria-live="polite"></div>
+      <ul id="alertList" class="alert-list"></ul>
+      <p class="small">Click an alert to open it and fly to the storm (switches to the nearest radar). Click a polygon on the map to read it.</p>
     </section>
   </div>
 
@@ -212,6 +247,13 @@
       Sites: NWS API · Map: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, CARTO, US Census. Not for life-safety decisions.
     </footer>
   </div>
+</aside>
+<aside id="alertCard" hidden aria-labelledby="acTitle">
+  <div class="ac-head"><span class="ac-swatch" id="acSwatch"></span><h2 id="acTitle"></h2><button id="acClose" aria-label="Close alert">✕</button></div>
+  <div class="ac-meta" id="acMeta"></div>
+  <div class="ac-tags" id="acTags"></div>
+  <div class="row"><button id="acGo" class="grow">Go to storm</button><a id="acLink" target="_blank" rel="noopener">Full history ↗</a></div>
+  <pre id="acText">Loading text…</pre>
 </aside>
 <div id="splitUI" hidden><span class="pane-label a">Reflectivity</span><span class="pane-label b">Velocity</span><div class="divider"></div></div>
 

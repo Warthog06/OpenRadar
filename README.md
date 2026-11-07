@@ -24,7 +24,8 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 - 3D on/off switch for a plain 2D radar view.
 - Side-by-side view: reflectivity and velocity in two panes that share one camera (stacked top/bottom on phones in portrait). The loop and rapid scan work in both panes.
 - Radar on the whole map: the map continues ~1,500 km in every direction with the national radar mosaic, and the selected radar's high-resolution data on top.
-- Controls are grouped into Radar, 3D and Settings tabs.
+- Controls are grouped into Radar, Alerts, 3D and Settings tabs.
+- Alerts: click any warning or advisory polygon on the map to read the full NWS text, with hail/wind/tornado tags and expiry. The Alerts tab lists every warning in effect (filterable). Clicking one switches to the nearest radar and flies to the storm.
 - Map picker: choose a radar by clicking it on a zoomable map (Leaflet) that shows the national radar mosaic (IEM) and the warning polygons in effect, so you can see where the storms are. In archive mode it jumps to the same moment on the new radar.
 - Archive mode: any date back to the 1990s, plus historical tornado presets. Step through scans with ◀ ▶.
 - 3D reflectivity surfaces at selectable dBZ levels, with vertical exaggeration, opacity and a cutaway plane.
@@ -40,7 +41,7 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 | `js/level2.js` | Archive II / message 31 parser → sweeps of REF, VEL, RHO, … |
 | `js/volume.js` | Beam-height math (4/3 earth model) → 3D Cartesian grid → surface-nets isosurfaces |
 | `js/worker.js` | Runs download, decode and meshing off the main thread; real-time chunk polling; loop frames |
-| `js/sources.js` | Data sources (all free, no keys) |
+| `js/sources.js` | Data sources (all free, no keys); warning text and polygon helpers |
 | `js/main.js` | three.js scene, map drawing, UI |
 | `js/picker.js` | Zoomable radar picker (Leaflet) with national mosaic |
 | `js/tiles.js` | OpenStreetMap / CARTO tiles drawn under the radar |

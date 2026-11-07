@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { listDay, radarSites, warningsAt, basemap } from './sources.js';
+import { listDay, radarSites, warningsAt, basemap, warningText, pointInGeometry, geometryCenter } from './sources.js';
 import { REF_COLORS } from './volume.js';
 import { openPicker } from './picker.js';
 import { renderBasemap, renderTiles, mosaicSource, BASEMAPS } from './tiles.js';
@@ -20,7 +20,8 @@ const PRESETS = [
   { label: 'Elkhorn, NE tornado (2024-04-26)', site: 'KOAX', t: '2024-04-26T20:21:00Z' },
   { label: 'Barnsdall, OK tornado (2024-05-07)', site: 'KINX', t: '2024-05-07T03:10:00Z' },
 ];
-const WARN_COLORS = { TO: '#ff3030', SV: '#ffd21f', FF: '#2bff6a', EW: '#ff8c00', SQ: '#bde8ff', MA: '#ff9ad5' };
+const WARN_COLORS = { TO: '#ff3030', SV: '#ffd21f', FF: '#2bff6a', EW: '#ff8c00', SQ: '#bde8ff', MA: '#ff9ad5', FL: '#00a651', FA: '#7fdc8f' };
+const warnColor = w => (w.emergency ? '#ff00ff' : WARN_COLORS[w.phenomena] || '#c0c8d2');
 
 const state = {
   site: 'KTLX', files: [], fileIdx: -1, meta: null, live: false,
@@ -28,6 +29,7 @@ const state = {
   rangeKm: 150, detail: 'normal', ccFilter: true, extendToGround: true, smooth: true,
   groundLayer: 'REF', showWarnings: true, cutAxis: 'off', cutPos: 0,
   ground: null, warnings: [], sites: [], autoFocus: true, archiveFiles: [],
+  selectedAlert: null, pendingFocus: null, alertFilter: 'severe',
   basemap: 'osm', show3d: true, rapidMode: 'low', rapid: {}, liveStatus: null,
   split: false, wide: true,
 };
@@ -180,6 +182,22 @@ function focusOn(f) {
   controls.update();
 }
 
+function toLocal(lon, lat) {
+  const s = state.meta.site;
+  return { east: (lon - s.lon) * Math.cos(s.lat * Math.PI / 180) * 111.195, north: (lat - s.lat) * 111.195 };
+}
+function focusLonLat(lon, lat) {
+  const { east, north } = toLocal(lon, lat);
+  if (!state.show3d) {
+    controls.target.set(east, 0, -north);
+    camera.position.set(east, 160, -north + 0.01);
+  } else {
+    controls.target.set(east, 3 * state.exag, -north);
+    camera.position.set(east + 45, 45 + 8 * state.exag, -north + 85);
+  }
+  controls.update();
+}
+
 function refreshMaterials() {
   for (const [level, mesh] of meshes) { mesh.material.dispose(); mesh.material = materialFor(level); }
 }
@@ -241,15 +259,35 @@ function view(kind) {
 
 // double-click the map to orbit around that spot
 const ray = new THREE.Raycaster();
-canvas.addEventListener('dblclick', e => {
+function groundHit(e) {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, yUp = r.height - (e.clientY - r.top);
   const p = panes().find(([px, py, pw, ph]) => x >= px && x <= px + pw && yUp >= py && yUp <= py + ph) || [0, 0, r.width, r.height];
   ray.setFromCamera(new THREE.Vector2(((x - p[0]) / p[2]) * 2 - 1, ((yUp - p[1]) / p[3]) * 2 - 1), camera);
-  const hit = ray.intersectObject(groundMesh)[0];
+  return ray.intersectObjects([groundMesh, wide.mesh].filter(m => m.visible))[0] || null;
+}
+canvas.addEventListener('dblclick', e => {
+  const hit = groundHit(e);
   if (!hit) return;
   const d = hit.point.clone().sub(controls.target);
+  d.y = 0;
   controls.target.add(d); camera.position.add(d);
+});
+// single click (not a drag): open the warning under the pointer
+let downAt = null;
+canvas.addEventListener('pointerdown', e => { downAt = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+canvas.addEventListener('pointerup', e => {
+  if (!downAt || !state.meta || !state.showWarnings) return;
+  const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y), dt = performance.now() - downAt.t;
+  downAt = null;
+  if (moved > 6 || dt > 500) return;
+  const hit = groundHit(e);
+  if (!hit) return;
+  const s = state.meta.site;
+  const lat = s.lat + (-hit.point.z) / 111.195;
+  const lon = s.lon + hit.point.x / (111.195 * Math.cos(s.lat * Math.PI / 180));
+  const w = state.warnings.find(x => pointInGeometry(lon, lat, x.geometry)); // list is sorted most severe first
+  if (w) openAlert(w, false); else if (!$('alertCard').hidden) closeAlert();
 });
 
 // ---------------- ground map ----------------
@@ -408,12 +446,21 @@ function drawGroundInto(cv, tex, layer) {
   buildOverlay();
   ctx.drawImage(overlay, 0, 0);
   if (state.showWarnings) {
-    for (const w of state.warnings) {
-      const col = w.emergency ? '#ff00ff' : WARN_COLORS[w.phenomena] || '#ffffff';
+    // least severe first so tornado warnings end up on top
+    for (let i = state.warnings.length - 1; i >= 0; i--) {
+      const w = state.warnings[i], col = warnColor(w), adv = w.significance === 'Y';
       polygonPath(ctx, w.geometry);
-      ctx.fillStyle = col + '1a'; ctx.fill();
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 7; ctx.stroke();
-      ctx.strokeStyle = col; ctx.lineWidth = 4; ctx.stroke();
+      ctx.fillStyle = col + (adv ? '12' : '1a'); ctx.fill();
+      ctx.setLineDash(adv ? [12, 8] : []);
+      ctx.strokeStyle = '#000'; ctx.lineWidth = adv ? 5 : 7; ctx.stroke();
+      ctx.strokeStyle = col; ctx.lineWidth = adv ? 2.5 : 4; ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const sel = state.selectedAlert && state.warnings.find(w => w.id === state.selectedAlert);
+    if (sel) {
+      polygonPath(ctx, sel.geometry);
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 10; ctx.globalAlpha = 0.5; ctx.stroke(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = warnColor(sel); ctx.lineWidth = 5; ctx.stroke();
     }
   }
   // beam line: always shown in live mode; bright while it is drawing the layer you are looking at
@@ -471,6 +518,7 @@ worker.onmessage = ev => {
     if (m.meta.mode === 'live' && !state.live) return; // stale message after leaving live mode
     state.meta = m.meta;
     updateStamp();
+    renderAlertList();
     const background = m.meta.mode === 'live' && meshes.size > 0;
     if (busy) pendingBuild = true; else { requestBuild(true); quietBuild = background; }
     maybeWarnings();
@@ -493,7 +541,10 @@ worker.onmessage = ev => {
       $('tilts').textContent = `${m.tilts.length} tilts: ${m.tilts.join('°, ')}°`;
     }
     for (const mesh of m.meshes) setMesh(mesh);
-    if (m.type === 'built' && state.autoFocus) { state.autoFocus = false; focusOn(m.focus); }
+    if (m.type === 'built' && state.pendingFocus && state.meta && state.pendingFocus.icao === state.meta.icao) {
+      focusLonLat(state.pendingFocus.lon, state.pendingFocus.lat);
+      state.pendingFocus = null; state.autoFocus = false;
+    } else if (m.type === 'built' && state.autoFocus && !state.pendingFocus) { state.autoFocus = false; focusOn(m.focus); }
     busy = false;
     quietBuild = false;
     hideProgress();
@@ -534,7 +585,119 @@ async function loadWarnings() {
   const t = state.meta.lowTime || state.meta.time;
   warnFor = t;
   try { state.warnings = await warningsAt(t); } catch { setNote('Warnings unavailable'); }
+  renderAlertList();
+  // keep an open card in sync (it may have expired or been updated)
+  if (state.selectedAlert && !state.warnings.some(w => w.id === state.selectedAlert)) $('acMeta').textContent += ' · no longer in effect';
   drawGround();
+}
+// live: refresh warnings every 2 minutes
+setInterval(() => { if (state.live && state.meta) loadWarnings(); }, 120000);
+
+// ---------------- alerts list + card ----------------
+const fmtClock = t => new Date(t).toISOString().slice(11, 16) + ' UTC';
+function relTime(t) {
+  const ref = state.live ? Date.now() : (state.meta ? state.meta.lowTime : Date.now());
+  const m = Math.round((t - ref) / 60000);
+  return m >= 0 ? (m < 60 ? `in ${m} min` : `in ${Math.floor(m / 60)} h ${m % 60} min`) : `${-m} min ago`;
+}
+function tagList(w) {
+  const t = w.tags, out = [];
+  if (w.emergency) out.push(['TORNADO EMERGENCY', true]);
+  if (w.pds) out.push(['Particularly dangerous situation', true]);
+  if (t.tornado) out.push([`Tornado: ${t.tornado.toLowerCase()}`, /OBSERVED/i.test(t.tornado)]);
+  if (t.damage) out.push([`Damage threat: ${t.damage.toLowerCase()}`, /CATASTROPHIC|DESTRUCTIVE|CONSIDERABLE/i.test(t.damage)]);
+  if (t.hail) out.push([`Hail ${t.hail}"`, +t.hail >= 1.75]);
+  if (t.wind) out.push([`Wind ${t.wind} mph`, +t.wind >= 70]);
+  if (t.flood) out.push([`Flash flood: ${String(t.flood).toLowerCase()}`, /CATASTROPHIC|CONSIDERABLE/i.test(t.flood)]);
+  if (t.squall) out.push([`Squall: ${String(t.squall).toLowerCase()}`, false]);
+  return out;
+}
+function nearestSite(lon, lat) {
+  let best = null, bd = Infinity;
+  for (const s of state.sites) {
+    const d = (s.lat - lat) ** 2 + ((s.lon - lon) * Math.cos(lat * Math.PI / 180)) ** 2;
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+function filteredAlerts() {
+  const f = state.alertFilter;
+  return state.warnings.filter(w => {
+    if (f === 'severe') return ['TO', 'SV', 'EW', 'SQ'].includes(w.phenomena) && w.significance === 'W';
+    if (f === 'warnings') return w.significance === 'W';
+    if (f === 'near') {
+      if (!state.meta || !state.meta.site) return false;
+      const [lon, lat] = geometryCenter(w.geometry), { east, north } = toLocal(lon, lat);
+      return Math.hypot(east, north) < 300;
+    }
+    return true;
+  });
+}
+function renderAlertList() {
+  const list = filteredAlerts();
+  const nWarn = state.warnings.filter(w => ['TO', 'SV', 'EW'].includes(w.phenomena) && w.significance === 'W').length;
+  const badge = $('alertCount');
+  badge.hidden = !nWarn; badge.textContent = nWarn;
+  badge.setAttribute('aria-label', `${nWarn} tornado and severe storm warnings`);
+  $('alertSummary').textContent = !state.showWarnings ? 'Warnings are turned off in Settings.'
+    : `${list.length} shown of ${state.warnings.length} in effect ${state.live ? 'now' : 'at ' + (state.meta ? fmtTime(state.meta.lowTime) : '')}.`;
+  const ul = $('alertList');
+  ul.innerHTML = '';
+  for (const w of list.slice(0, 200)) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.style.setProperty('--c', warnColor(w));
+    if (w.id === state.selectedAlert) b.classList.add('sel');
+    const site = nearestSite(...geometryCenter(w.geometry));
+    const tags = tagList(w).map(x => x[0]).slice(0, 2).join(' · ');
+    b.innerHTML = `<span class="sw"></span><span class="t"></span><span class="m"></span>`;
+    b.querySelector('.t').textContent = `${w.label} #${w.eventid}` + (w.emergency ? ' (EMERGENCY)' : '');
+    b.querySelector('.m').textContent = `NWS ${w.wfo}${site ? ' · near ' + site.id : ''} · until ${fmtClock(w.expire)}${tags ? ' · ' + tags : ''}`;
+    b.addEventListener('click', () => openAlert(w, true));
+    li.appendChild(b); ul.appendChild(li);
+  }
+}
+
+async function openAlert(w, fly) {
+  state.selectedAlert = w.id;
+  const card = $('alertCard');
+  card.hidden = false;
+  $('acSwatch').style.background = warnColor(w);
+  $('acTitle').textContent = `${w.label} #${w.eventid}` + (w.emergency ? ' (TORNADO EMERGENCY)' : '');
+  const expired = w.expire < (state.live ? Date.now() : state.meta.lowTime);
+  $('acMeta').textContent = `NWS ${w.wfo} · issued ${fmtClock(w.issue)} · ${expired ? 'expired' : 'expires'} ${fmtClock(w.expire)} (${relTime(w.expire)})`;
+  const tags = $('acTags'); tags.innerHTML = '';
+  for (const [t, hot] of tagList(w)) { const sp = document.createElement('span'); sp.textContent = t; if (hot) sp.className = 'hot'; tags.appendChild(sp); }
+  $('acLink').href = w.href || 'https://mesonet.agron.iastate.edu/vtec/';
+  $('acGo').onclick = () => goToStorm(w);
+  renderAlertList(); drawGround();
+  if (fly) goToStorm(w);
+  const pre = $('acText');
+  pre.textContent = 'Loading text…';
+  try {
+    const txt = await warningText(w);
+    if (state.selectedAlert === w.id) pre.textContent = txt || 'No text available.';
+  } catch (e) { if (state.selectedAlert === w.id) pre.textContent = `Text unavailable: ${e.message}`; }
+}
+function closeAlert() {
+  $('alertCard').hidden = true;
+  state.selectedAlert = null;
+  renderAlertList(); drawGround();
+}
+
+// Fly to a warning: switch to the nearest radar if needed (same time, or live), then focus the polygon.
+function goToStorm(w) {
+  const [lon, lat] = geometryCenter(w.geometry);
+  const site = nearestSite(lon, lat);
+  if (site && state.meta && site.id !== state.meta.icao) {
+    state.pendingFocus = { lon, lat, icao: site.id };
+    state.site = site.id; $('site').value = site.id;
+    if (state.live) loadLatest(); else loadAt(state.meta.lowTime);
+    setNote(`Switching to ${site.id} (${site.name}), the closest radar to this storm…`);
+  } else if (state.meta) {
+    focusLonLat(lon, lat);
+  }
+  document.body.classList.remove('panel-open');
 }
 
 function loadFile(idx) {
@@ -835,6 +998,9 @@ function bind() {
     updateRapidInfo(); drawGround();
   });
   $('wide').addEventListener('change', e => { state.wide = e.target.checked; drawGround(); });
+  $('alertFilter').addEventListener('change', e => { state.alertFilter = e.target.value; renderAlertList(); });
+  $('acClose').addEventListener('click', closeAlert);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('alertCard').hidden && !$('picker').open) closeAlert(); });
   // tabs (arrow keys move between them, as the ARIA tabs pattern expects)
   const tabs = [...document.querySelectorAll('[role=tab]')];
   const selectTab = t => {
