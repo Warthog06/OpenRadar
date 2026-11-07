@@ -22,6 +22,9 @@ Shareable links: `#site=KTLX&live=1` or `#site=KTLX&t=2013-05-20T20:00Z`.
 - Rapid scan (live): new radials are drawn every few seconds as the radar scans, with a line showing where the beam points. "Lowest tilt" updates the low-level scan whenever the radar is on it; "Follow the radar" shows whichever tilt is being scanned right now. A status line says what it is doing or waiting for.
 - OpenStreetMap under the radar (or a dark OSM-based map, or plain outlines), with city names and roads.
 - 3D on/off switch for a plain 2D radar view.
+- Side-by-side view: reflectivity and velocity in two panes that share one camera (stacked top/bottom on phones in portrait). The loop and rapid scan work in both panes.
+- Radar on the whole map: the map continues ~1,500 km in every direction with the national radar mosaic, and the selected radar's high-resolution data on top.
+- Controls are grouped into Radar, 3D and Settings tabs.
 - Map picker: choose a radar by clicking it on a zoomable map (Leaflet) that shows the national radar mosaic (IEM) and the warning polygons in effect, so you can see where the storms are. In archive mode it jumps to the same moment on the new radar.
 - Archive mode: any date back to the 1990s, plus historical tornado presets. Step through scans with ◀ ▶.
 - 3D reflectivity surfaces at selectable dBZ levels, with vertical exaggeration, opacity and a cutaway plane.

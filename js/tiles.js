@@ -15,10 +15,22 @@ export const BASEMAPS = {
   },
 };
 
-const tileUrl = (style, z, x, y) => {
-  const b = BASEMAPS[style];
-  const s = b.subdomains ? b.subdomains[(x + y) % b.subdomains.length] : '';
-  return b.url.replace('{s}', s).replace('{z}', z).replace('{x}', x).replace('{y}', y);
+// IEM national base-reflectivity mosaic (all radars), current or at a past 5-minute time.
+export function mosaicSource(timeMs, live) {
+  let url;
+  if (live) url = `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png?_=${Math.floor(Date.now() / 300000)}`;
+  else {
+    const ts = new Date(Math.floor(timeMs / 300000) * 300000).toISOString().replace(/[-:T]/g, '').slice(0, 12);
+    url = `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-${ts}/{z}/{x}/{y}.png`;
+  }
+  return { url, maxZoom: 8, attribution: 'Radar mosaic: IEM' };
+}
+
+const tileUrl = (src, z, x, y) => {
+  const n = 2 ** z;
+  x = ((x % n) + n) % n;
+  const s = src.subdomains ? src.subdomains[(x + y) % src.subdomains.length] : '';
+  return src.url.replace('{s}', s).replace('{z}', z).replace('{x}', x).replace('{y}', y);
 };
 
 const lon2x = (lon, z) => ((lon + 180) / 360) * 2 ** z;
@@ -42,26 +54,26 @@ function loadTile(url) {
 }
 
 /**
- * Draw a basemap into a square canvas centred on a radar.
+ * Draw web map tiles into a square canvas centred on a radar, `extentKm` from centre to edge.
  * The canvas uses the same local projection as the radar layer (km east/north of the site),
  * so each Web Mercator tile is placed by its corner coordinates.
  */
-export async function renderBasemap(canvas, style, site, rangeKm) {
+export async function renderTiles(canvas, src, site, extentKm) {
   const S = canvas.width;
   const ctx = canvas.getContext('2d');
   const cosLat = Math.cos(site.lat * Math.PI / 180);
   const project = (lon, lat) => [
-    ((lon - site.lon) * cosLat * 111.195 + rangeKm) / (2 * rangeKm) * S,
-    (rangeKm - (lat - site.lat) * 111.195) / (2 * rangeKm) * S,
+    ((lon - site.lon) * cosLat * 111.195 + extentKm) / (2 * extentKm) * S,
+    (extentKm - (lat - site.lat) * 111.195) / (2 * extentKm) * S,
   ];
-  const dLat = rangeKm / 111.195, dLon = rangeKm / (111.195 * cosLat);
+  const dLat = Math.min(extentKm / 111.195, 80 - Math.abs(site.lat)), dLon = extentKm / (111.195 * cosLat);
   // pick the zoom where one tile pixel is about one canvas pixel
-  const z = Math.max(3, Math.min(12, Math.round(Math.log2(40075 * cosLat * S / (256 * 2 * rangeKm)))));
+  const z = Math.max(2, Math.min(src.maxZoom || 12, 12, Math.round(Math.log2(40075 * cosLat * S / (256 * 2 * extentKm)))));
   const x0 = Math.floor(lon2x(site.lon - dLon, z)), x1 = Math.floor(lon2x(site.lon + dLon, z));
-  const y0 = Math.floor(lat2y(site.lat + dLat, z)), y1 = Math.floor(lat2y(site.lat - dLat, z));
+  const y0 = Math.max(0, Math.floor(lat2y(site.lat + dLat, z))), y1 = Math.min(2 ** z - 1, Math.floor(lat2y(site.lat - dLat, z)));
   const jobs = [];
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
-    jobs.push(loadTile(tileUrl(style, z, x, y)).then(img => ({ img, x, y })));
+    jobs.push(loadTile(tileUrl(src, z, x, y)).then(img => ({ img, x, y })));
   }
   const tiles = await Promise.all(jobs);
   ctx.clearRect(0, 0, S, S);
@@ -75,3 +87,5 @@ export async function renderBasemap(canvas, style, site, rangeKm) {
   }
   return { missing, total: tiles.length };
 }
+
+export const renderBasemap = (canvas, style, site, extentKm) => renderTiles(canvas, BASEMAPS[style], site, extentKm);

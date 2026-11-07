@@ -313,12 +313,15 @@ async function buildLoop(msg) {
   const out = [], transfer = [];
   list.forEach((f, i) => {
     progress('Drawing loop frames', i / list.length);
-    const isVel = msg.layer === 'VEL';
-    const img = sweepImage(isVel ? f.vel : f.ref, isVel ? f.velAngle : f.angle, isVel ? 'VEL' : 'REF', msg.rangeKm, msg.size);
-    out.push({ time: f.time, img });
-    transfer.push(img.buffer);
+    const imgs = {};
+    for (const layer of msg.layers) {
+      const isVel = layer === 'VEL';
+      imgs[layer] = sweepImage(isVel ? f.vel : f.ref, isVel ? f.velAngle : f.angle, layer, msg.rangeKm, msg.size);
+      transfer.push(imgs[layer].buffer);
+    }
+    out.push({ time: f.time, imgs });
   });
-  post({ type: 'loop', id: msg.id, size: msg.size, layer: msg.layer, frames: out }, transfer);
+  post({ type: 'loop', id: msg.id, size: msg.size, layers: msg.layers, frames: out }, transfer);
 }
 
 // ---------------- messages ----------------

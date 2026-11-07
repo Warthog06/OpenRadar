@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { listDay, radarSites, warningsAt, basemap } from './sources.js';
 import { REF_COLORS } from './volume.js';
 import { openPicker } from './picker.js';
-import { renderBasemap, BASEMAPS } from './tiles.js';
+import { renderBasemap, renderTiles, mosaicSource, BASEMAPS } from './tiles.js';
 
 // ---------------- config ----------------
 const LEVELS = {
@@ -29,6 +29,7 @@ const state = {
   groundLayer: 'REF', showWarnings: true, cutAxis: 'off', cutPos: 0,
   ground: null, warnings: [], sites: [], autoFocus: true, archiveFiles: [],
   basemap: 'osm', show3d: true, rapidMode: 'low', rapid: {}, liveStatus: null,
+  split: false, wide: true,
 };
 
 const $ = id => document.getElementById(id);
@@ -40,12 +41,12 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.localClippingEnabled = true;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0a0e13');
-const camera = new THREE.PerspectiveCamera(45, 1, 0.5, 6000);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.5, 12000);
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.maxPolarAngle = Math.PI * 0.495;
 controls.minDistance = 5;
-controls.maxDistance = 1500;
+controls.maxDistance = 4500;
 
 scene.add(new THREE.HemisphereLight(0xf2f6ff, 0x39424f, 1.9));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.position.set(180, 400, 220); scene.add(sun);
@@ -58,7 +59,36 @@ groundTex.colorSpace = THREE.SRGBColorSpace;
 groundTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 const groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: groundTex }));
 groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.renderOrder = -1;
 scene.add(groundMesh);
+// split view: the right/bottom pane shows velocity from its own texture
+const groundCanvas2 = document.createElement('canvas');
+groundCanvas2.width = groundCanvas2.height = 2048;
+const groundTex2 = new THREE.CanvasTexture(groundCanvas2);
+groundTex2.colorSpace = THREE.SRGBColorSpace;
+groundTex2.anisotropy = groundTex.anisotropy;
+
+// "Whole map": a much larger plane under the radar square with a wide basemap and the
+// national radar mosaic, so the map and radar continue past the selected radar's range.
+// Mosaic and basemap are composited into one opaque texture (two textures for split view:
+// with mosaic for reflectivity, basemap only for velocity) drawn first without depth writes,
+// so the radar square always wins and nothing z-fights.
+const WIDE_KM = 1500;
+const mkCanvas = () => { const c = document.createElement('canvas'); c.width = c.height = 2048; return c; };
+const mkTex = c => { const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = groundTex.anisotropy; return t; };
+const wide = { base: mkCanvas(), mosaic: mkCanvas(), comp: mkCanvas(), baseKey: '', mosaicKey: '', baseReady: false, mosaicReady: false };
+wide.texComp = mkTex(wide.comp);
+wide.texBase = mkTex(wide.base);
+wide.mesh = new THREE.Mesh(new THREE.PlaneGeometry(2 * WIDE_KM, 2 * WIDE_KM), new THREE.MeshBasicMaterial({ map: wide.texComp, depthWrite: false }));
+wide.mesh.rotation.x = -Math.PI / 2; wide.mesh.position.y = -0.05; wide.mesh.renderOrder = -3; wide.mesh.visible = false;
+scene.add(wide.mesh);
+function composeWide() {
+  const ctx = wide.comp.getContext('2d'), S = wide.comp.width;
+  ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
+  if (wide.baseReady) ctx.drawImage(wide.base, 0, 0);
+  if (wide.mosaicReady) { ctx.globalAlpha = 0.85; ctx.drawImage(wide.mosaic, 0, 0); ctx.globalAlpha = 1; }
+  wide.texComp.needsUpdate = true; wide.texBase.needsUpdate = true;
+}
 
 const storm = new THREE.Group();   // y-scaled by vertical exaggeration
 scene.add(storm);
@@ -163,8 +193,18 @@ function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== Math.floor(w * renderer.getPixelRatio()) || canvas.height !== Math.floor(h * renderer.getPixelRatio())) {
     renderer.setSize(w, h, false);
-    camera.aspect = w / h; camera.updateProjectionMatrix();
   }
+  const vertical = state.split && h > w; // phones in portrait: stack the panes
+  const aspect = !state.split ? w / h : vertical ? w / (h / 2) : (w / 2) / h;
+  if (Math.abs(camera.aspect - aspect) > 1e-6) { camera.aspect = aspect; camera.updateProjectionMatrix(); }
+  $('splitUI').classList.toggle('vertical', vertical);
+}
+
+// Split view panes in CSS pixels: [x, y-from-bottom, w, h]
+function panes() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!state.split) return [[0, 0, w, h]];
+  return h > w ? [[0, h / 2, w, h / 2], [0, 0, w, h / 2]] : [[0, 0, w / 2, h], [w / 2, 0, w / 2, h]];
 }
 
 function view(kind) {
@@ -176,18 +216,36 @@ function view(kind) {
   controls.update();
 }
 
-(function loop() {
+(function frame() {
   resize();
   controls.update();
-  renderer.render(scene, camera);
-  requestAnimationFrame(loop);
+  const ps = panes();
+  if (ps.length === 1) {
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, canvas.clientWidth, canvas.clientHeight);
+    groundMesh.material.map = groundTex;
+    renderer.render(scene, camera);
+  } else {
+    renderer.setScissorTest(true);
+    ps.forEach((p, i) => {
+      renderer.setViewport(...p); renderer.setScissor(...p);
+      groundMesh.material.map = i === 0 ? groundTex : groundTex2;
+      wide.mesh.material.map = i === 0 ? wide.texComp : wide.texBase; // the mosaic is reflectivity only
+      renderer.render(scene, camera);
+    });
+    wide.mesh.material.map = wide.texComp;
+    renderer.setScissorTest(false);
+  }
+  requestAnimationFrame(frame);
 })();
 
 // double-click the map to orbit around that spot
 const ray = new THREE.Raycaster();
 canvas.addEventListener('dblclick', e => {
   const r = canvas.getBoundingClientRect();
-  ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+  const x = e.clientX - r.left, yUp = r.height - (e.clientY - r.top);
+  const p = panes().find(([px, py, pw, ph]) => x >= px && x <= px + pw && yUp >= py && yUp <= py + ph) || [0, 0, r.width, r.height];
+  ray.setFromCamera(new THREE.Vector2(((x - p[0]) / p[2]) * 2 - 1, ((yUp - p[1]) / p[3]) * 2 - 1), camera);
   const hit = ray.intersectObject(groundMesh)[0];
   if (!hit) return;
   const d = hit.point.clone().sub(controls.target);
@@ -195,21 +253,21 @@ canvas.addEventListener('dblclick', e => {
 });
 
 // ---------------- ground map ----------------
-function project(lon, lat) {
-  const s = state.meta.site, R = state.rangeKm, S = groundCanvas.width;
+function project(lon, lat, R = state.rangeKm) {
+  const s = state.meta.site, S = groundCanvas.width;
   const east = (lon - s.lon) * Math.cos(s.lat * Math.PI / 180) * 111.195;
   const north = (lat - s.lat) * 111.195;
   return [(east + R) / (2 * R) * S, (R - north) / (2 * R) * S];
 }
 
-function strokeLines(ctx, geom) {
+function strokeLines(ctx, geom, R = state.rangeKm) {
   const lines = geom.type === 'MultiLineString' ? geom.coordinates : geom.type === 'LineString' ? [geom.coordinates] : [];
   const S = groundCanvas.width, m = S * 0.3;
   ctx.beginPath();
   for (const line of lines) {
     let pen = false;
     for (const [lon, lat] of line) {
-      const [x, y] = project(lon, lat);
+      const [x, y] = project(lon, lat, R);
       if (x < -m || y < -m || x > S + m || y > S + m) { pen = false; continue; }
       if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
     }
@@ -227,9 +285,8 @@ function polygonPath(ctx, geom) {
 }
 
 let mapLines = null;
-const radarImg = document.createElement('canvas');
 const overlay = document.createElement('canvas');
-let overlayKey = '', radarKey = '', groundVersion = 0;
+let overlayKey = '', groundVersion = 0;
 
 // County/state lines + range rings, redrawn only when the site or range changes.
 function buildOverlay() {
@@ -268,40 +325,86 @@ function ensureTiles() {
     });
 }
 
+// Whole-map layers: re-rendered when the site, style or (for the mosaic) the scan time changes.
+function ensureWide() {
+  wide.mesh.visible = state.wide && !!state.meta;
+  if (!state.wide || !state.meta || !state.meta.site) return;
+  const site = state.meta.site;
+  const baseKey = `${state.basemap}|${state.meta.icao}`;
+  if (baseKey !== wide.baseKey) {
+    wide.baseKey = baseKey; wide.baseReady = false;
+    if (state.basemap === 'lines') {
+      const ctx = wide.base.getContext('2d'), S = wide.base.width;
+      ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
+      if (mapLines) {
+        ctx.strokeStyle = 'rgba(215,225,240,0.75)'; ctx.lineWidth = 1.5;
+        strokeLines(ctx, mapLines.states, WIDE_KM); strokeLines(ctx, mapLines.nation, WIDE_KM);
+        wide.baseReady = true;
+      } else wide.baseKey = ''; // retry once outlines arrive
+      composeWide();
+    } else {
+      renderTiles(wide.base, BASEMAPS[state.basemap], site, WIDE_KM).then(() => {
+        if (wide.baseKey === baseKey) { wide.baseReady = true; composeWide(); }
+      });
+    }
+  }
+  const live = state.live && state.meta.mode === 'live';
+  const src = mosaicSource(state.meta.lowTime || state.meta.time, live);
+  const mosaicKey = `${state.meta.icao}|${src.url}`;
+  if (mosaicKey !== wide.mosaicKey) {
+    wide.mosaicKey = mosaicKey; wide.mosaicReady = false;
+    renderTiles(wide.mosaic, src, site, WIDE_KM).then(() => {
+      if (wide.mosaicKey === mosaicKey) { wide.mosaicReady = true; composeWide(); }
+    });
+  }
+}
+
 const rapidCanvas = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
 // follow mode: the previous sweep stays underneath while the next one is drawn
 const rapidBase = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
 
+const radarImgs = { REF: document.createElement('canvas'), VEL: document.createElement('canvas') };
+const radarKeys = { REF: '', VEL: '' };
+
 function drawGround() {
-  const ctx = groundCanvas.getContext('2d');
-  const S = groundCanvas.width;
+  $('attrib').textContent = [state.basemap === 'lines' ? '' : BASEMAPS[state.basemap].attribution, state.wide ? 'Radar mosaic: IEM' : ''].filter(Boolean).join(' · ');
+  ensureWide();
+  if (state.split) {
+    drawGroundInto(groundCanvas, groundTex, 'REF');
+    drawGroundInto(groundCanvas2, groundTex2, 'VEL');
+  } else drawGroundInto(groundCanvas, groundTex, state.groundLayer);
+}
+
+function drawGroundInto(cv, tex, layer) {
+  const ctx = cv.getContext('2d');
+  const S = cv.width;
   ctx.fillStyle = '#121821'; ctx.fillRect(0, 0, S, S);
-  $('attrib').textContent = state.basemap === 'lines' ? '' : BASEMAPS[state.basemap].attribution;
-  if (!state.meta) { groundTex.needsUpdate = true; return; }
+  if (!state.meta) { tex.needsUpdate = true; return; }
   ensureTiles();
   if (state.basemap !== 'lines' && tileReady) ctx.drawImage(tileCanvas, 0, 0);
   let src = null;
-  const r = state.rapid[state.groundLayer];
-  const rapidLive = state.live && !loop.playing && state.rapidMode !== 'off' && state.groundLayer !== 'off';
+  const r = state.rapid[layer];
+  const rapidLive = state.live && !loop.playing && state.rapidMode !== 'off' && layer !== 'off';
   const showRapid = rapidLive && r && r.rangeKm === state.rangeKm;
   const follow = showRapid && state.rapidMode === 'follow';
   if (follow) {
-    if (r.hasBase) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidBase[state.groundLayer], 0, 0, S, S); }
-  } else if (state.groundLayer !== 'off') {
-    if (loop.playing && loop.bitmaps.length) src = loop.bitmaps[loop.i];
+    if (r.hasBase) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidBase[layer], 0, 0, S, S); }
+  } else if (layer !== 'off') {
+    const frames = loop.frames[layer];
+    if (loop.playing && frames && frames.length) src = frames[Math.min(loop.i, frames.length - 1)];
     else if (state.ground) {
-      const g = state.ground, key = `${groundVersion}|${state.groundLayer}`;
-      if (key !== radarKey) {
-        radarKey = key;
-        radarImg.width = radarImg.height = g.size;
-        radarImg.getContext('2d').putImageData(new ImageData(state.groundLayer === 'VEL' ? g.vel : g.ref, g.size, g.size), 0, 0);
+      const g = state.ground, key = `${groundVersion}`, img = radarImgs[layer];
+      if (key !== radarKeys[layer]) {
+        radarKeys[layer] = key;
+        img.width = img.height = g.size;
+        img.getContext('2d').putImageData(new ImageData(layer === 'VEL' ? g.vel : g.ref, g.size, g.size), 0, 0);
       }
-      src = radarImg;
+      src = img;
     }
   }
   if (src) { ctx.imageSmoothingEnabled = false; ctx.drawImage(src, 0, 0, S, S); }
   // rapid scan: newest radials of the sweep that is still being scanned
-  if (showRapid) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidCanvas[state.groundLayer], 0, 0, S, S); }
+  if (showRapid) { ctx.imageSmoothingEnabled = false; ctx.drawImage(rapidCanvas[layer], 0, 0, S, S); }
   buildOverlay();
   ctx.drawImage(overlay, 0, 0);
   if (state.showWarnings) {
@@ -327,7 +430,7 @@ function drawGround() {
   // radar site marker
   ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(S / 2, S / 2, 7, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#0a0e13'; ctx.beginPath(); ctx.arc(S / 2, S / 2, 3, 0, Math.PI * 2); ctx.fill();
-  groundTex.needsUpdate = true;
+  tex.needsUpdate = true;
 }
 
 basemap().then(b => { mapLines = b; drawGround(); }).catch(() => setNote('Map outlines unavailable (offline?)'));
@@ -336,7 +439,7 @@ basemap().then(b => { mapLines = b; drawGround(); }).catch(() => setNote('Map ou
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 let reqId = 0, latestBuild = 0, busy = false, pendingBuild = false;
 let quietBuild = false; // live tilt updates rebuild in the background without the progress toast
-const loop = { playing: false, bitmaps: [], times: [], i: 0, timer: null, reqId: 0 };
+const loop = { playing: false, frames: {}, times: [], i: 0, timer: null, reqId: 0 };
 
 worker.onmessage = ev => {
   const m = ev.data;
@@ -517,25 +620,30 @@ function loopUrls() {
 function requestLoop() {
   if (!state.meta) return;
   loop.reqId++;
-  worker.postMessage({ type: 'loop', id: loop.reqId, urls: loopUrls(), layer: state.groundLayer === 'VEL' ? 'VEL' : 'REF', rangeKm: state.rangeKm, size: 1024 });
+  const layers = state.split ? ['REF', 'VEL'] : [state.groundLayer === 'VEL' ? 'VEL' : 'REF'];
+  worker.postMessage({ type: 'loop', id: loop.reqId, urls: loopUrls(), layers, rangeKm: state.rangeKm, size: 1024 });
 }
 async function receiveLoop(m) {
   if (m.id !== loop.reqId || !loop.playing) return;
   if (!busy) hideProgress();
-  const bitmaps = await Promise.all(m.frames.map(f => createImageBitmap(new ImageData(f.img, m.size, m.size))));
-  if (m.id !== loop.reqId || !loop.playing) return bitmaps.forEach(b => b.close());
-  loop.bitmaps.forEach(b => b.close());
-  loop.bitmaps = bitmaps;
+  const frames = {};
+  for (const layer of m.layers) {
+    frames[layer] = await Promise.all(m.frames.map(f => createImageBitmap(new ImageData(f.imgs[layer], m.size, m.size))));
+  }
+  const all = Object.values(frames).flat();
+  if (m.id !== loop.reqId || !loop.playing) return all.forEach(b => b.close());
+  Object.values(loop.frames).flat().forEach(b => b.close());
+  loop.frames = frames;
   loop.times = m.frames.map(f => f.time);
-  loop.i = Math.max(0, bitmaps.length - 1);
-  if (bitmaps.length < 2) setNote('Only one low-level scan so far: the loop will grow as scans arrive.');
+  loop.i = Math.max(0, m.frames.length - 1);
+  if (m.frames.length < 2) setNote('Only one low-level scan so far: the loop will grow as scans arrive.');
   loopTick();
 }
 function loopTick() {
   clearTimeout(loop.timer);
   if (!loop.playing) return;
   drawGround();
-  const n = loop.bitmaps.length;
+  const n = loop.times.length;
   $('loopInfo').textContent = n ? `Frame ${loop.i + 1}/${n} · ${fmtTime(loop.times[loop.i]).slice(11)}` : 'Loading…';
   if (n < 2) return;
   const last = loop.i === n - 1;
@@ -552,7 +660,7 @@ function startLoop() {
 function stopLoop() {
   loop.playing = false; loop.reqId++;
   clearTimeout(loop.timer);
-  loop.bitmaps.forEach(b => b.close()); loop.bitmaps = []; loop.times = [];
+  Object.values(loop.frames).flat().forEach(b => b.close()); loop.frames = {}; loop.times = [];
   $('loop').setAttribute('aria-pressed', 'false'); $('loop').textContent = 'Play low-level loop';
   $('loopInfo').textContent = '';
   drawGround();
@@ -714,10 +822,37 @@ function bind() {
   for (const b of document.querySelectorAll('[data-ground]')) b.addEventListener('click', () => {
     state.groundLayer = b.dataset.ground;
     syncGroundButtons(); updateRapidInfo(); updateStamp();
-    if (loop.playing) { if (state.groundLayer === 'off') stopLoop(); else { loop.bitmaps = []; requestLoop(); } }
+    if (loop.playing) { if (state.groundLayer === 'off') stopLoop(); else requestLoop(); }
     drawGround();
   });
   $('loop').addEventListener('click', () => (loop.playing ? stopLoop() : startLoop()));
+  $('split').addEventListener('change', e => {
+    state.split = e.target.checked;
+    $('splitUI').hidden = !state.split;
+    document.querySelectorAll('[data-ground]').forEach(b => { b.disabled = state.split; });
+    if (state.split && state.groundLayer === 'off') state.groundLayer = 'REF';
+    if (loop.playing) requestLoop();
+    updateRapidInfo(); drawGround();
+  });
+  $('wide').addEventListener('change', e => { state.wide = e.target.checked; drawGround(); });
+  // tabs (arrow keys move between them, as the ARIA tabs pattern expects)
+  const tabs = [...document.querySelectorAll('[role=tab]')];
+  const selectTab = t => {
+    for (const x of tabs) {
+      const on = x === t;
+      x.setAttribute('aria-selected', on); x.tabIndex = on ? 0 : -1;
+      $(x.getAttribute('aria-controls')).hidden = !on;
+    }
+    try { localStorage.setItem('openradar-tab', t.id); } catch { /* storage unavailable */ }
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener('click', () => selectTab(t));
+    t.addEventListener('keydown', e => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (d) { const n = tabs[(i + d + tabs.length) % tabs.length]; selectTab(n); n.focus(); }
+    });
+  });
+  try { const saved = $(localStorage.getItem('openradar-tab')); if (saved && tabs.includes(saved)) selectTab(saved); } catch { /* ignore */ }
   $('basemap').addEventListener('change', e => { state.basemap = e.target.value; tileKey = ''; drawGround(); });
   $('rapidMode').addEventListener('change', e => { state.rapidMode = e.target.value; state.rapid = {}; sendRapidConfig(); updateRapidInfo(); updateStamp(); drawGround(); });
   $('show3d').addEventListener('change', e => {

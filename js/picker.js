@@ -1,7 +1,7 @@
 // Map-based radar picker (Leaflet): zoomable map with every WSR-88D site, the national
 // radar mosaic ("quilt" of all radars) and the warning polygons in effect.
 import { warningsAt } from './sources.js';
-import { BASEMAPS } from './tiles.js';
+import { BASEMAPS, mosaicSource } from './tiles.js';
 
 const LEAFLET = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/';
 const WARN_COLORS = { TO: '#ff3030', SV: '#ffd21f', FF: '#2bff6a', EW: '#ff8c00', SQ: '#bde8ff', MA: '#ff9ad5' };
@@ -26,12 +26,7 @@ async function loadLeaflet() {
   return L;
 }
 
-// IEM national base-reflectivity mosaic tiles, current or at a past 5-minute time.
-function mosaicUrl(timeMs, live) {
-  if (live) return `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png?_=${Math.floor(Date.now() / 300000)}`;
-  const ts = new Date(Math.floor(timeMs / 300000) * 300000).toISOString().replace(/[-:T]/g, '').slice(0, 12);
-  return `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::USCOMP-N0Q-${ts}/{z}/{x}/{y}.png`;
-}
+const mosaicUrl = (timeMs, live) => mosaicSource(timeMs, live).url;
 
 function buildMap(box) {
   map = L.map(box, { zoomSnap: 0.5, minZoom: 2, maxZoom: 9, worldCopyJump: true });
